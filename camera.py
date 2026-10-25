@@ -1,4 +1,4 @@
-"""Sony A7 IV USB adapter and an offline preview/capture smoke test."""
+"""Auto-detect a Sony USB camera and check its live-view/photo capabilities."""
 
 import argparse
 from dataclasses import dataclass
@@ -24,6 +24,13 @@ class CameraFrame:
     frame_no: int
 
 
+class CameraError(RuntimeError):
+    def __init__(self, message, model, capabilities):
+        super().__init__(message)
+        self.model = model
+        self.capabilities = capabilities
+
+
 class SonyCamera:
     """One SDK process, one request at a time, no queued preview frames."""
 
@@ -36,6 +43,29 @@ class SonyCamera:
         self.reader = None
         self.events = queue.Queue()
         self.model = None
+        self.capabilities = {}
+
+    def _accept_camera(self, event):
+        if event.get("protocol") != 2:
+            raise RuntimeError("Rebuild the camera helper: .venv/bin/python scripts/build_sony.py (capability protocol 2 required)")
+        if event.get("connection") != "USB" or not isinstance(event.get("model"), str) or not event["model"]:
+            raise RuntimeError("Camera helper returned invalid USB camera information")
+        self.model = event["model"]
+        caps = event.get("capabilities")
+        if (not isinstance(caps, dict) or any(type(caps.get(key)) is not bool for key in ("live_view", "capture_ready"))
+                or any(not isinstance(caps.get(key), list) or any(not isinstance(value, str) for value in caps[key])
+                       for key in ("preview_issues", "capture_issues"))):
+            raise RuntimeError("Camera helper returned invalid capability information")
+        self.capabilities = caps
+        issues = list(caps["preview_issues"])
+        if not caps["live_view"] and not issues:
+            issues.append("Live view is unavailable.")
+        if self.enable_capture:
+            issues.extend(caps["capture_issues"])
+            if not caps["capture_ready"] and not issues:
+                issues.append("Still-photo capture is unavailable.")
+        if issues:
+            raise CameraError(f"{self.model}: {' '.join(issues)}", self.model, caps)
 
     def _read_output(self):
         try:
@@ -84,13 +114,15 @@ class SonyCamera:
                                             stderr=self.log, start_new_session=True)
             self.reader = threading.Thread(target=self._read_output, daemon=True)
             self.reader.start()
-            self.model = self._receive("ready", timeout=30)["model"]
+            self._accept_camera(self._receive("ready", timeout=30))
             if self.enable_capture:
                 self._send("PREPARE")
                 self._receive("prepared")
             return self
-        except BaseException:
+        except BaseException as exc:
             self.close()
+            if isinstance(exc, RuntimeError) and self.model and not isinstance(exc, CameraError):
+                raise CameraError(str(exc), self.model, self.capabilities) from None
             raise
 
     def latest_frame(self):
@@ -161,6 +193,7 @@ def main():
     try:
         with SonyCamera(output / "moments", enable_capture=args.capture) as camera:
             report["camera"] = camera.model
+            report["capabilities"] = camera.capabilities
             frame = camera.latest_frame()
             frame.image.save(output / "preview.jpg", quality=95)
             report["preview_size"] = list(frame.image.size)
@@ -170,6 +203,8 @@ def main():
             report["status"] = "completed"
     except (RuntimeError, OSError) as exc:
         report.update(status="failed", error=str(exc))
+        if isinstance(exc, CameraError):
+            report.update(camera=exc.model, capabilities=exc.capabilities)
         print(json.dumps(report), flush=True)
         return 1
     finally:

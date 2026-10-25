@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from camera import CameraFrame, SonyCamera
+from camera import CameraError, CameraFrame, SonyCamera
 import futurelens as fl
 from model import ApiConfig
 
@@ -25,6 +25,7 @@ class Clock:
 
 class FakeCamera:
     model = "ILCE-7M4"
+    capabilities = {"live_view": True, "capture_ready": True, "preview_issues": [], "capture_issues": []}
 
     def __init__(self, clock, output):
         self.clock, self.output = clock, output
@@ -187,6 +188,63 @@ class CameraWorkflowTests(unittest.TestCase):
             {"event": "shutter_sent"}, {"event": "captured", "files": [str(self.output / "00000/missing.jpg")]},
         ]), self.assertRaises(RuntimeError):
             camera.capture(0)
+
+    def test_report_uses_detected_camera_instead_of_a7_iv(self):
+        self.camera.model = "ILCE-6700"
+        with patch("futurelens.decide", return_value=False):
+            fl.run(self.args("--max-requests", "1"))
+        report = self.report()
+        self.assertEqual(report["source"], "sony:usb:ILCE-6700")
+        self.assertEqual(report["camera_model"], "ILCE-6700")
+        self.assertEqual(report["camera_capabilities"], self.camera.capabilities)
+
+    def test_capability_failure_is_reported_before_any_model_call(self):
+        capabilities = {"live_view": True, "capture_ready": False, "preview_issues": [],
+                        "capture_issues": ["Still-photo shutter release is not advertised by this camera."]}
+        self.factory.side_effect = CameraError("Capture unavailable", "ILME-FR7", capabilities)
+        with patch("futurelens.decide") as decide, self.assertRaises(CameraError):
+            fl.run(self.args())
+        decide.assert_not_called()
+        report = self.report()
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["source"], "sony:usb:ILME-FR7")
+        self.assertEqual(report["camera_capabilities"], capabilities)
+
+    def test_preview_only_camera_is_accepted_without_capture(self):
+        event = {"protocol": 2, "model": "ILME-FR7", "connection": "USB",
+                 "capabilities": {"live_view": True, "capture_ready": False, "preview_issues": [],
+                                  "capture_issues": ["Still-photo shutter is unavailable."]}}
+        camera = SonyCamera(self.output)
+        camera._accept_camera(event)
+        self.assertEqual(camera.model, "ILME-FR7")
+        camera.enable_capture = True
+        with self.assertRaises(CameraError):
+            camera._accept_camera(event)
+
+    def test_unsupported_camera_never_receives_prepare(self):
+        helper = self.output.parent / "fake-helper"
+        helper.touch()
+        event = {"event": "ready", "protocol": 2, "model": "Preview Camera", "connection": "USB",
+                 "capabilities": {"live_view": True, "capture_ready": False, "preview_issues": [],
+                                  "capture_issues": ["No still shutter."]}}
+        camera = SonyCamera(self.output / "moments", enable_capture=True, helper=helper)
+        with patch("camera.subprocess.Popen") as process, patch("camera.threading.Thread"), \
+                patch.object(camera, "_receive", return_value=event), patch.object(camera, "_send") as send:
+            process.return_value.poll.return_value = 0
+            with self.assertRaises(CameraError):
+                camera.__enter__()
+            send.assert_not_called()
+        self.assertIsNone(camera.process)
+        self.assertIsNone(camera.log)
+
+    def test_stale_helper_and_invalid_capabilities_fail_closed(self):
+        camera = SonyCamera(self.output, enable_capture=True)
+        valid = {"protocol": 2, "model": "ILCE-7RM5", "connection": "USB", "capabilities": self.camera.capabilities}
+        for event in ({"model": "ILCE-7M4"}, {**valid, "connection": "IP"},
+                      {**valid, "capabilities": {}},
+                      {**valid, "capabilities": {**self.camera.capabilities, "capture_ready": 1}}):
+            with self.subTest(event=event), self.assertRaises(RuntimeError):
+                camera._accept_camera(event)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Control a Sony A7 IV over USB and photograph a requested condition."""
+"""Auto-detect a supported Sony USB camera and photograph a requested condition."""
 
 import argparse
 from datetime import datetime, timezone
@@ -10,7 +10,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from camera import SonyCamera, DEFAULT_HELPER
+from camera import SonyCamera, CameraError, DEFAULT_HELPER
 from model import API_ENDPOINT, INSTRUCTIONS, MODEL, ApiError, decide, load_config, validate_config
 
 
@@ -28,6 +28,8 @@ def run_camera(args, config, output, report):
     with SonyCamera(output / "moments", enable_capture=not args.dry_run,
                     helper=args.camera_helper) as camera:
         report["camera_model"] = camera.model
+        report["source"] = f"sony:usb:{camera.model}"
+        report["camera_capabilities"] = camera.capabilities
         write_json(output / "results.json", report)
         start = time.monotonic()
         deadline = start + args.duration
@@ -118,7 +120,7 @@ def run(args) -> Path:
         "model_settings": {"effort": "low", "thinking": "disabled"},
         "api_host": urlsplit(API_ENDPOINT).hostname,
         "instructions": INSTRUCTIONS, "request": args.request,
-        "source": "sony:usb:ILCE-7M4",
+        "source": "sony:usb",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(args, key) for key in
                      ("duration", "fps", "max_requests", "cooldown", "max_frame_age", "max_shots")},
@@ -134,6 +136,9 @@ def run(args) -> Path:
         raise
     except Exception as exc:
         report.update(status="failed", error_type=type(exc).__name__)
+        if isinstance(exc, CameraError):
+            report.update(camera_model=exc.model, source=f"sony:usb:{exc.model}",
+                          camera_capabilities=exc.capabilities, camera_error=str(exc))
         if isinstance(exc, ApiError):
             report["api_error"] = exc.details
         write_json(output / "results.json", report)

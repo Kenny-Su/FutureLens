@@ -16,6 +16,7 @@
 
 #include "CameraRemote_SDK.h"
 #include "IDeviceCallback.h"
+#include "camera_capabilities.h"
 
 namespace sdk = SCRSDK;
 namespace fs = std::filesystem;
@@ -41,6 +42,37 @@ void check(sdk::CrError code, const char* action) {
     }
 }
 
+std::string strings_json(const std::vector<std::string>& values) {
+    std::string result = "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) result += ',';
+        result += quote(values[i]);
+    }
+    return result + ']';
+}
+
+std::string capabilities_json(const futurelens::Capabilities& caps) {
+    std::ostringstream out;
+    out << std::boolalpha << "{\"live_view\":" << caps.live_view
+        << ",\"capture_ready\":" << caps.capture_ready()
+        << ",\"storage\":" << (caps.destination ? quote(
+            *caps.destination == sdk::CrStillImageStoreDestination_HostPCAndMemoryCard ? "computer_and_card" : "computer_only") : "null")
+        << ",\"transfer_size\":" << quote(caps.adjustable_transfer_size ? "original" : "camera_default")
+        << ",\"focus\":" << quote(caps.autofocus ? "autofocus" : "manual_or_preset")
+        << ",\"files_per_capture\":" << caps.expected_files
+        << ",\"preview_issues\":" << strings_json(caps.preview_issues)
+        << ",\"capture_issues\":" << strings_json(caps.capture_issues) << '}';
+    return out.str();
+}
+
+void require_capture(const futurelens::Capabilities& caps, const std::string& model) {
+    if (caps.capture_ready()) return;
+    std::string message = model + " is not ready for this photo workflow:";
+    for (const auto& issue : caps.preview_issues) message += " " + issue;
+    for (const auto& issue : caps.capture_issues) message += " " + issue;
+    throw std::runtime_error(message);
+}
+
 class Camera : public sdk::IDeviceCallback {
     std::mutex mutex;
     std::condition_variable changed;
@@ -51,6 +83,7 @@ class Camera : public sdk::IDeviceCallback {
     sdk::ICrEnumCameraObjectInfo* cameras = nullptr;
     std::vector<std::string> downloads;
     std::vector<std::pair<CrInt32u, CrInt64u>> restore;
+    std::optional<CrInt64u> prepared_destination;
 
     void healthy() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -61,9 +94,10 @@ class Camera : public sdk::IDeviceCallback {
     sdk::CrDeviceProperty property(CrInt32u code) {
         sdk::CrDeviceProperty* properties = nullptr;
         CrInt32 count = 0;
-        check(sdk::GetSelectDeviceProperties(handle, 1, &code, &properties, &count), "Read property");
-        if (!properties || count != 1) {
+        auto error = sdk::GetSelectDeviceProperties(handle, 1, &code, &properties, &count);
+        if (error || !properties || count != 1 || properties[0].GetCode() != code) {
             if (properties) sdk::ReleaseDeviceProperties(handle, properties);
+            check(error, "Read property");
             throw std::runtime_error("Camera property unavailable: " + std::to_string(code));
         }
         sdk::CrDeviceProperty result = properties[0];
@@ -73,23 +107,68 @@ class Camera : public sdk::IDeviceCallback {
 
     void set_property(CrInt32u code, CrInt64u value, bool remember = true) {
         auto prop = property(code);
-        if (prop.GetCurrentValue() == value) return;
-        if (!prop.IsSetEnableCurrentValue())
-            throw std::runtime_error("Camera setting is not writable: " + std::to_string(code));
+        const bool readable = prop.IsGetEnableCurrentValue();
+        if (readable && prop.GetCurrentValue() == value) return;
+        auto values = futurelens::enum_values(prop.GetValueType(), prop.GetValues(), prop.GetValueSize());
+        if (!prop.IsSetEnableCurrentValue() || std::find(values.begin(), values.end(), value) == values.end())
+            throw std::runtime_error("Camera setting does not allow the requested value: " + std::to_string(code));
+        if (remember && !readable)
+            throw std::runtime_error("Cannot preserve the original camera setting: " + std::to_string(code));
         // Remember before sending: a timeout may still leave the setting changed.
         if (remember) restore.emplace_back(code, prop.GetCurrentValue());
         prop.SetCurrentValue(value);
         check(sdk::SetDeviceProperty(handle, &prop), "Set property");
+        if (!readable) return; // A set-only half-press is confirmed by FocusIndication instead.
         for (int i = 0; i < 30; ++i) {
             std::this_thread::sleep_for(100ms);
             healthy();
-            if (property(code).GetCurrentValue() == value) return;
+            auto current = property(code);
+            if (current.IsGetEnableCurrentValue() && current.GetCurrentValue() == value) return;
         }
         throw std::runtime_error("Camera setting change timed out");
     }
 
 public:
     std::string model;
+
+    futurelens::Snapshot snapshot() {
+        healthy();
+        futurelens::Snapshot result;
+        sdk::CrDeviceProperty* properties = nullptr;
+        CrInt32 count = 0;
+        auto error = sdk::GetDeviceProperties(handle, &properties, &count);
+        if (error || !properties || count <= 0) {
+            if (properties) sdk::ReleaseDeviceProperties(handle, properties);
+            check(error, "Read camera capabilities");
+            throw std::runtime_error("Camera returned no device properties");
+        }
+        for (CrInt32 i = 0; i < count; ++i) {
+            const auto& prop = properties[i];
+            result.properties[prop.GetCode()] = {
+                prop.IsGetEnableCurrentValue(), prop.IsSetEnableCurrentValue(),
+                prop.IsGetEnableCurrentValue() ? prop.GetCurrentValue() : 0,
+                futurelens::enum_values(prop.GetValueType(), prop.GetValues(), prop.GetValueSize()),
+            };
+        }
+        sdk::ReleaseDeviceProperties(handle, properties);
+        sdk::CrControlCodeInfo* commands = nullptr;
+        CrInt32u command_count = 0;
+        error = sdk::GetSupportedControlCodes(handle, &commands, &command_count);
+        if (error) {
+            std::ostringstream message;
+            message << "Cannot verify shutter capability (Sony SDK 0x" << std::hex << error << ").";
+            result.command_error = message.str();
+        } else if (commands) {
+            for (CrInt32u i = 0; i < command_count; ++i) {
+                if (commands[i].GetCode() != sdk::CrControlCode_Release) continue;
+                auto values = futurelens::enum_values(commands[i].GetValueType(), commands[i].GetValues(), commands[i].GetValueSize());
+                result.shutter_release = std::find(values.begin(), values.end(), sdk::CrControlButton_Down) != values.end()
+                    && std::find(values.begin(), values.end(), sdk::CrControlButton_Up) != values.end();
+            }
+        }
+        if (commands) sdk::ReleaseControlCodes(handle, commands);
+        return result;
+    }
 
     void OnConnected(sdk::DeviceConnectionVersioin) override {
         std::lock_guard<std::mutex> lock(mutex);
@@ -125,21 +204,23 @@ public:
         initialized = sdk::Init();
         if (!initialized) throw std::runtime_error("Sony SDK initialization failed");
         check(sdk::EnumCameraObjects(&cameras, 3), "Enumerate cameras");
-        sdk::ICrCameraObjectInfo* selected = nullptr;
+        std::vector<futurelens::Device> devices;
         if (cameras) for (CrInt32u i = 0; i < cameras->GetCount(); ++i) {
-            auto* info = const_cast<sdk::ICrCameraObjectInfo*>(cameras->GetCameraObjectInfo(i));
-            if (std::string(info->GetConnectionTypeName()) != "USB") continue;
-            if (std::string(info->GetModel()) != "ILCE-7M4") continue;
-            if (selected) throw std::runtime_error("Connect only one ILCE-7M4 for this prototype");
-            selected = info;
+            const auto* info = cameras->GetCameraObjectInfo(i);
+            devices.push_back({info && info->GetModel() ? info->GetModel() : "Unknown Sony camera",
+                               info && info->GetConnectionTypeName() ? info->GetConnectionTypeName() : ""});
         }
-        if (!selected) throw std::runtime_error("No USB ILCE-7M4 found. Select Remote Shooting on the camera and allow USB access.");
-        model = selected->GetModel();
+        auto index = futurelens::select_usb(devices);
+        auto* selected = const_cast<sdk::ICrCameraObjectInfo*>(cameras->GetCameraObjectInfo(index));
+        model = devices[index].model;
+        std::cerr << "Detected USB camera: " << model << '\n';
         check(sdk::Connect(selected, this, &handle, sdk::CrSdkControlMode_Remote,
                            sdk::CrReconnecting_OFF), "Connect");
         std::unique_lock<std::mutex> lock(mutex);
         if (!changed.wait_for(lock, 15s, [&] { return connected || error; }))
             throw std::runtime_error("Camera connection timed out");
+        if (error == sdk::CrError_Connect_TimeOut)
+            throw std::runtime_error(model + " USB connection timed out (Sony SDK 0x8208). Reconnect the camera in Remote Shooting / PC Remote mode and close other camera-control applications.");
         check(error, "Connect callback");
         lock.unlock();
         std::this_thread::sleep_for(1s);
@@ -147,6 +228,9 @@ public:
 
     void frame() {
         healthy();
+        auto live = property(sdk::CrDeviceProperty_LiveViewStatus);
+        if (!live.IsGetEnableCurrentValue() || live.GetCurrentValue() != sdk::CrLiveView_Enable)
+            throw std::runtime_error("Live view is currently unavailable; close camera menus/playback and check Remote Shooting mode");
         sdk::CrImageInfo info;
         check(sdk::GetLiveViewImageInfo(handle, &info), "Live-view info");
         auto size = info.GetBufferSize();
@@ -165,45 +249,39 @@ public:
     }
 
     void prepare_capture() {
-        healthy();
-        if (property(sdk::CrDeviceProperty_DriveMode).GetCurrentValue() != sdk::CrDrive_Single)
-            throw std::runtime_error("Set the camera Drive Mode to Single Shooting before capture");
-        set_property(sdk::CrDeviceProperty_StillImageStoreDestination,
-                     sdk::CrStillImageStoreDestination_HostPCAndMemoryCard);
-        set_property(sdk::CrDeviceProperty_Still_Image_Trans_Size,
-                     sdk::CrPropertyStillImageTransSize_Original);
-        std::cerr << "Capture ready. Focus mode: " << property(sdk::CrDeviceProperty_FocusMode).GetCurrentValue() << '\n';
+        const auto caps = futurelens::assess(snapshot());
+        require_capture(caps, model); // Complete all checks before changing any setting.
+        set_property(sdk::CrDeviceProperty_StillImageStoreDestination, *caps.destination);
+        if (caps.adjustable_transfer_size)
+            set_property(sdk::CrDeviceProperty_Still_Image_Trans_Size, sdk::CrPropertyStillImageTransSize_Original);
+        prepared_destination = caps.destination;
+        std::cerr << "Capture ready: " << model << "; storage: "
+                  << (*caps.destination == sdk::CrStillImageStoreDestination_HostPCAndMemoryCard ? "computer + card" : "computer only") << '\n';
     }
 
     void capture(const fs::path& folder, double max_delay) {
         const auto expires = std::chrono::steady_clock::now() + std::chrono::duration<double>(max_delay);
-        healthy();
-        // Recheck in case the user changed drive mode while the model was working.
-        if (property(sdk::CrDeviceProperty_DriveMode).GetCurrentValue() != sdk::CrDrive_Single)
-            throw std::runtime_error("Drive Mode changed; capture cancelled");
-        auto file_type = property(sdk::CrDeviceProperty_FileType).GetCurrentValue();
-        size_t expected_files = 1;
-        if (file_type == sdk::CrFileType_RawJpeg || file_type == sdk::CrFileType_RawHeif) {
-            auto pc_save = property(sdk::CrDeviceProperty_RAW_J_PC_Save_Image).GetCurrentValue();
-            if (pc_save == sdk::CrPropertyRAWJPCSaveImage_RAWAndJPEG || pc_save == sdk::CrPropertyRAWJPCSaveImage_RAWAndHEIF)
-                expected_files = 2;
-            else if (pc_save != sdk::CrPropertyRAWJPCSaveImage_JPEGOnly && pc_save != sdk::CrPropertyRAWJPCSaveImage_RAWOnly
-                     && pc_save != sdk::CrPropertyRAWJPCSaveImage_HEIFOnly)
-                throw std::runtime_error("Unrecognized PC image-save setting");
-        } else if (file_type != sdk::CrFileType_Jpeg && file_type != sdk::CrFileType_Raw && file_type != sdk::CrFileType_Heif)
-            throw std::runtime_error("Unrecognized still-image file type");
+        // Recheck current settings after every model decision, before touching the shutter.
+        const auto state = snapshot();
+        const auto caps = futurelens::assess(state);
+        require_capture(caps, model);
+        if (!prepared_destination || state.get(sdk::CrDeviceProperty_StillImageStoreDestination).current != *prepared_destination ||
+            (caps.adjustable_transfer_size && state.get(sdk::CrDeviceProperty_Still_Image_Trans_Size).current != sdk::CrPropertyStillImageTransSize_Original))
+            throw std::runtime_error("Photo-transfer settings changed after preparation; restart the run");
+        const auto expected_files = caps.expected_files;
         if (!fs::create_directory(folder)) throw std::runtime_error("Capture directory already exists");
         std::string path = folder.string(), prefix = "FL_";
         check(sdk::SetSaveInfo(handle, path.data(), prefix.data(), 1), "Set capture destination");
         // Follow Sony's afShooting sample: half press, await focus, then full press.
-        auto focus_mode = property(sdk::CrDeviceProperty_FocusMode).GetCurrentValue();
-        half_pressed = true;
-        set_property(sdk::CrDeviceProperty_S1, sdk::CrLockIndicator_Locked, false);
-        if (focus_mode != sdk::CrFocus_MF) {
+        if (caps.autofocus) {
+            half_pressed = true;
+            set_property(sdk::CrDeviceProperty_S1, sdk::CrLockIndicator_Locked, false);
             bool focused = false;
             for (int i = 0; i < 30; ++i) {
                 healthy();
-                auto focus = property(sdk::CrDeviceProperty_FocusIndication).GetCurrentValue();
+                auto indication = property(sdk::CrDeviceProperty_FocusIndication);
+                if (!indication.IsGetEnableCurrentValue()) throw std::runtime_error("Autofocus confirmation became unavailable");
+                auto focus = indication.GetCurrentValue();
                 if (focus == sdk::CrFocusIndicator_Focused_AF_S || focus == sdk::CrFocusIndicator_Focused_AF_C
                     || focus == sdk::CrFocusIndicator_TrackingSubject_AF_C) { focused = true; break; }
                 if (std::chrono::steady_clock::now() >= expires) break;
@@ -224,8 +302,10 @@ public:
         check(sdk::SendCommand(handle, sdk::CrCommandId_Release, sdk::CrCommandParam_Up), "Shutter up");
         shutter_down = false;
         std::cout << "{\"event\":\"shutter_sent\"}" << std::endl;
-        set_property(sdk::CrDeviceProperty_S1, sdk::CrLockIndicator_Unlocked, false);
-        half_pressed = false;
+        if (half_pressed) {
+            set_property(sdk::CrDeviceProperty_S1, sdk::CrLockIndicator_Unlocked, false);
+            half_pressed = false;
+        }
         std::cerr << "Shutter released; waiting for " << expected_files << " photo file(s)\n";
         std::unique_lock<std::mutex> lock(mutex);
         if (!changed.wait_for(lock, 60s, [&] {
@@ -283,7 +363,9 @@ int main(int argc, char** argv) {
         if (!fs::is_directory(output)) throw std::runtime_error("Output directory must exist");
         Camera camera;
         camera.connect();
-        std::cout << "{\"event\":\"ready\",\"model\":" << quote(camera.model) << "}" << std::endl;
+        auto capabilities = futurelens::assess(camera.snapshot());
+        std::cout << "{\"event\":\"ready\",\"protocol\":2,\"connection\":\"USB\",\"model\":" << quote(camera.model)
+                  << ",\"capabilities\":" << capabilities_json(capabilities) << "}" << std::endl;
         bool prepared = false;
         std::string command;
         while (std::getline(std::cin, command)) {
