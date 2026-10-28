@@ -507,7 +507,7 @@ class CameraWorkflowTests(unittest.TestCase):
             camera.capture(0)
 
     def test_preview_only_camera_is_accepted_without_capture(self):
-        event = {"protocol": 2, "model": "ILME-FR7", "connection": "USB",
+        event = {"model": "ILME-FR7", "connection": "USB",
                  "capabilities": {"live_view": True, "capture_ready": False, "preview_issues": [],
                                   "capture_issues": ["Still-photo shutter is unavailable."]}}
         camera = SonyCamera(self.output)
@@ -520,7 +520,7 @@ class CameraWorkflowTests(unittest.TestCase):
     def test_unsupported_camera_never_receives_prepare(self):
         helper = self.output.parent / "fake-helper"
         helper.touch()
-        event = {"event": "ready", "protocol": 2, "model": "Preview Camera", "connection": "USB",
+        event = {"event": "ready", "model": "Preview Camera", "connection": "USB",
                  "capabilities": {"live_view": True, "capture_ready": False, "preview_issues": [],
                                   "capture_issues": ["No still shutter."]}}
         camera = SonyCamera(self.output / "moments", enable_capture=True, helper=helper)
@@ -533,9 +533,9 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertIsNone(camera.process)
         self.assertIsNone(camera.log)
 
-    def test_stale_helper_and_invalid_capabilities_fail_closed(self):
+    def test_missing_camera_information_and_invalid_capabilities_fail_closed(self):
         camera = SonyCamera(self.output, enable_capture=True)
-        valid = {"protocol": 2, "model": "ILCE-7RM5", "connection": "USB", "capabilities": self.camera.capabilities}
+        valid = {"model": "ILCE-7RM5", "connection": "USB", "capabilities": self.camera.capabilities}
         for event in ({"model": "ILCE-7M4"}, {**valid, "connection": "IP"},
                       {**valid, "capabilities": {}},
                       {**valid, "capabilities": {**self.camera.capabilities, "capture_ready": 1}}):

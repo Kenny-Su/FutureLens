@@ -62,7 +62,7 @@ class SessionManager:
             settings = session_settings(data)
             validate_config(load_config())
             if not self.helper.is_file():
-                raise ValueError("Build the Sony camera helper first. See docs/usage.md.")
+                raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
             self.output, self.error = output, None
             self.stop_event = threading.Event()
             self._launch("monitor", lambda: self._monitor(settings))

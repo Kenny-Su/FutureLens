@@ -12,7 +12,7 @@ import time
 
 from PIL import Image
 
-DEFAULT_HELPER = Path(__file__).with_name("build") / "sony/sony_camera"
+DEFAULT_HELPER = Path(__file__).with_name("runtime") / "sony/macos/sony_camera"
 
 
 @dataclass
@@ -44,8 +44,6 @@ class SonyCamera:
         self.capabilities = {}
 
     def _accept_camera(self, event):
-        if event.get("protocol") != 2:
-            raise RuntimeError("Rebuild the camera helper: .venv/bin/python scripts/build_sony.py (capability protocol 2 required)")
         if event.get("connection") != "USB" or not isinstance(event.get("model"), str) or not event["model"]:
             raise RuntimeError("Camera helper returned invalid USB camera information")
         self.model = event["model"]
@@ -101,7 +99,7 @@ class SonyCamera:
 
     def __enter__(self):
         if not self.helper.is_file():
-            raise RuntimeError("Build the camera helper first: .venv/bin/python scripts/build_sony.py")
+            raise RuntimeError("The bundled camera runtime is missing. Restore runtime/sony from the FutureLens repository.")
         self.output.mkdir(parents=True, exist_ok=True)
         self.log = (self.output.parent / "camera-sdk.log").open("wb")
         command = [str(self.helper), str(self.output)]

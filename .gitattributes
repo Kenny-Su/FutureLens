@@ -1,0 +1,4 @@
+# Ship the runtime in ordinary Git so a clone needs no LFS or SDK download.
+runtime/sony/macos/sony_camera binary
+runtime/sony/macos/**/*.dylib binary
+runtime/sony/licenses/*.zip binary

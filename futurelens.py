@@ -334,7 +334,7 @@ def run_session(settings: SessionSettings, output: Path, *, camera_helper=DEFAUL
     (output / "moments").mkdir()
     report = {
         "status": "running", "phase": "connecting", "mode": "sony_usb",
-        "prompt_version": "claude-agent-v1", "journal_version": 2, "provider": "anthropic", "model": MODEL,
+        "provider": "anthropic", "model": MODEL,
         "model_settings": {"effort": "low", "thinking": "disabled", "automatic_prompt_caching": True},
         "api_host": urlsplit(API_ENDPOINT).hostname,
         "instructions": INSTRUCTIONS, "request": settings.request,

@@ -3,7 +3,8 @@
 [Back to the project overview](../README.md)
 
 This guide covers setup, camera operation, troubleshooting, and development.
-Run the commands from the repository root. FutureLens runs on macOS and controls
+Run the commands from the repository root. FutureLens runs on macOS 14.1 or later
+(Apple silicon and Intel, subject to Sony's supported OS versions) and controls
 one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. FutureLens uses its Messages API with
@@ -20,13 +21,19 @@ See [Sony's official compatibility page](https://support.d-imaging.sony.co.jp/ap
 for supported cameras and firmware requirements. Consult the API Reference included
 with your SDK for each camera's supported connection types. FutureLens uses USB;
 network connections are outside its current scope. Newly supported cameras may
-require an SDK update and a helper rebuild.
+require a new FutureLens runtime release.
 
-Hardware testing so far used Sony Camera Remote SDK 2.02.00 with an A7 IV
+The bundled runtime uses Sony Camera Remote SDK 2.02.00. Hardware testing so far
+used an A7 IV
 (ILCE-7M4). Other models need on-device verification. FutureLens checks the
 connected camera's capabilities before enabling capture.
 
 ## Setup
+
+The repository includes a prebuilt camera helper and Sony's runtime libraries in
+`runtime/sony/`. Normal setup needs **no Sony SDK download, compiler, CMake, or Xcode**.
+The runtime is about 30 MB and uses ordinary Git files, so Git LFS is not required.
+SDK headers are needed only by maintainers changing native code.
 
 Use Python 3.11+ in a project virtual environment:
 
@@ -62,20 +69,11 @@ configured on the camera. Manual focus is useful for a fixed scene; with autofoc
 the helper half-presses and waits briefly for focus before triggering the shutter.
 Close other applications that are controlling the same camera.
 
-Build the native helper using Apple's command-line developer tools and your downloaded
-Sony SDK. CMake and a full Xcode installation are not required:
+The interface uses the included camera runtime automatically.
 
-```bash
-.venv/bin/python scripts/build_sony.py \
-  --sdk "$HOME/Downloads/CrSDK_v2/SimpleCli.zip"
-```
-
-The script extracts Sony's headers and runtime libraries unchanged, then calls
-`clang++` directly to compile our helper and link it to `libCr_Core`. It preserves
-the SDK's required runtime-library layout. The files stay under the ignored
-`build/sony/` directory, and the original SDK download remains untouched.
-Rebuild after source changes; the helper is `build/sony/sony_camera`, and the Python
-adapter checks its capability-protocol version.
+Runtime license details, third-party notices, and the Sony-supplied libusb source
+are in [runtime/sony](../runtime/sony/README.md). The proprietary libraries are
+included as a component of FutureLens; their separate licenses continue to apply.
 
 The helper considers every USB camera enumerated by the installed Sony SDK, without
 a fixed model whitelist. Network cameras are ignored. If multiple USB cameras are
@@ -98,7 +96,7 @@ Offline tests cover different capability combinations.
 
 ## Camera interface
 
-After setup and building the camera helper, launch the local interface:
+After setup, launch the local interface:
 
 ```bash
 .venv/bin/python ui.py
@@ -137,7 +135,7 @@ observation interval or add AI calls**. Refreshing or closing the browser does n
 stop monitoring. Reopening the URL restores the current session while the server
 is running. Ctrl-C in the terminal requests a stop, waits for camera cleanup, and
 closes the server. Starting a new session keeps previous session files on disk;
-the first version of the interface only browses the current server session.
+the interface only browses the current server session.
 
 The interface uses Python's standard-library HTTP server and plain HTML/CSS/JavaScript.
 It passes validated settings directly to the monitoring engine in one worker thread. There is no Node build step
@@ -223,7 +221,7 @@ reports the resource and limit. All previews, event traces, and transcripts rema
 on disk, including the observation that could not be sent. 990,000 tokens is an
 upper ceiling, not an expected request size.
 
-New sessions use journal format version 2:
+Each new session stores:
 
 - `runs/<preview ID>/conversation.jsonl`: that run's instruction and context,
   model responses, and tool results, including the final capture outcome.
@@ -298,6 +296,38 @@ Stopping `ptpcamerad` alone was ineffective because Preview restarted it. Other
 connection-timeout causes are still possible; a USB handle alone does not prove
 an app is blocking the SDK.
 
+## Rebuilding the native runtime (maintainers only)
+
+Users can skip this section. To change the C++ helper or upgrade the bundled SDK,
+obtain Sony's SDK and use Apple's command-line developer tools:
+
+```bash
+.venv/bin/python scripts/build_sony.py \
+  --sdk "$HOME/Downloads/CrSDK_v2/SimpleCli.zip" --bundle
+```
+
+The simple build script extracts headers into ignored `build/sony/include`, builds
+our helper for both `arm64` and `x86_64`, and copies it plus Sony's unchanged runtime
+libraries into `runtime/sony/macos`. It preserves the required relative library
+layout and retains the full `external/crsdk` runtime. No SDK headers or sample
+source are included in the distributed runtime. `--bundle` also refreshes the
+SDK's open-source notices and libusb source; keep Sony's sibling source folder
+available, or supply `--libusb-source /path/to/libusb.zip`.
+
+Without `--bundle`, the script updates only the ignored development build; the
+interface continues using the checked-in runtime. Always bundle after changing
+the native helper, then run the tests before distributing the update.
+
+The offline check below loads the runtime libraries without initializing the SDK,
+connecting to a camera, or calling Claude:
+
+```bash
+runtime/sony/macos/sony_camera --check-runtime
+```
+
+This Git checkout includes a compiled helper, rather than a standalone signed
+and notarized macOS app installer.
+
 ## Code and checks
 
 Our native bridge uses Sony's SDK headers and libraries directly. It provides the
@@ -311,11 +341,12 @@ safeguards. Claude decisions, timing, and capture limits remain in Python.
 - `camera.py`: persistent SDK-process adapter used by the interface and monitoring engine.
 - `native/sony_camera.cpp`: USB connection, live view, autofocus/shutter, and downloads.
 - `native/camera_capabilities.h`: USB selection and capability-based capture policy.
-- `scripts/build_sony.py`: local macOS helper build using the downloaded SDK and `clang++`.
+- `scripts/build_sony.py`: maintainer-only universal macOS build and runtime packaging with `clang++`.
 - `test_model.py`: tool-call validation, capacity boundaries, and fixed-endpoint transport checks.
 - `test_history.py`: preview and conversation persistence with local image references.
 - `test_camera.py`: agent replay, call budgets, scheduling, capacity stops, capture limits, and cleanup.
 - `test_ui.py`: settings validation, exclusive camera ownership, local HTTP controls, and media access.
+- `test_runtime.py`: bundled library loading, portable paths, and package contents.
 - `test_native.py` / `native/test_camera_capabilities.cpp`: offline USB-selection and
   capability checks, compiled against the installed SDK headers without connecting to a camera.
 

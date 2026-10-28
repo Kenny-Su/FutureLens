@@ -1,0 +1,9 @@
+{
+  "sdk_version": "2.2.0",
+  "platform": "macOS",
+  "minimum_os": "14.1",
+  "architectures": [
+    "arm64",
+    "x86_64"
+  ]
+}

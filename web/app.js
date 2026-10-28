@@ -85,7 +85,7 @@ function renderSetup() {
   const checking = state.operation === "check";
   const check = state.camera_check;
   const captureReady = check?.capabilities?.capture_ready;
-  text("helper-status", state.helper_ready ? "Ready" : "Build required");
+  text("helper-status", state.helper_ready ? "Included" : "Missing");
   $("helper-status").className = state.helper_ready ? "ready" : "missing";
   text("api-status", state.api_ready ? "Configured" : "Key missing");
   $("api-status").className = state.api_ready ? "ready" : "missing";

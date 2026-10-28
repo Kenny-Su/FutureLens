@@ -1,6 +1,7 @@
 // A persistent, single-camera Sony SDK bridge. SDK calls stay on the main thread;
 // callbacks only update state. stdout is reserved for JSON lines + JPEG payloads.
 #include <chrono>
+#include <dlfcn.h>
 #include <algorithm>
 #include <condition_variable>
 #include <cmath>
@@ -354,8 +355,32 @@ public:
     ~Camera() { close(); }
 };
 
+// Load every shipped library without initializing the SDK or accessing a camera.
+void check_runtime(const fs::path& directory) {
+    const char* libraries[] = {
+        "libCr_Core.dylib", "libmonitor_protocol.dylib", "libmonitor_protocol_pf.dylib",
+        "Contents/Frameworks/CrAdapter/libCr_PTP_IP.dylib",
+        "Contents/Frameworks/CrAdapter/libCr_PTP_USB.dylib",
+        "Contents/Frameworks/CrAdapter/libssh2.dylib",
+        "Contents/Frameworks/CrAdapter/libusb-1.0.0.dylib",
+    };
+    for (const auto* library : libraries) {
+        void* handle = dlopen((directory / library).c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!handle) throw std::runtime_error(std::string("Cannot load ") + library + ": " + dlerror());
+        dlclose(handle);
+    }
+    auto version = sdk::GetSDKVersion();
+    std::cout << "{\"event\":\"runtime\",\"sdk_version\":"
+              << quote(std::to_string(version >> 24) + "." + std::to_string((version >> 16) & 0xff)
+                       + "." + std::to_string(version & 0xffff)) << "}" << std::endl;
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--check-runtime") {
+            check_runtime(fs::absolute(argv[0]).parent_path());
+            return 0;
+        }
         if (argc < 2 || argc > 3) throw std::runtime_error("Usage: sony_camera OUTPUT_DIRECTORY [--enable-capture]");
         fs::path output = fs::absolute(argv[1]);
         bool capture_enabled = argc == 3 && std::string(argv[2]) == "--enable-capture";
@@ -364,7 +389,7 @@ int main(int argc, char** argv) {
         Camera camera;
         camera.connect();
         auto capabilities = futurelens::assess(camera.snapshot());
-        std::cout << "{\"event\":\"ready\",\"protocol\":2,\"connection\":\"USB\",\"model\":" << quote(camera.model)
+        std::cout << "{\"event\":\"ready\",\"connection\":\"USB\",\"model\":" << quote(camera.model)
                   << ",\"capabilities\":" << capabilities_json(capabilities) << "}" << std::endl;
         bool prepared = false;
         std::string command;

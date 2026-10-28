@@ -79,7 +79,9 @@ settings, and installed SDK version.
 ## Available today
 
 FutureLens is an early camera tool for **macOS and one Sony USB camera**, controlled
-through a local browser interface.
+through a local browser interface. The macOS camera runtime is included for Apple
+silicon and Intel Macs, so users can clone the repository and run FutureLens without
+downloading Sony's SDK or compiling native code.
 You set exposure and image format on the camera; FutureLens handles the capture
 decision. It suits scenes that remain visible long enough for a preview to be
 evaluated and the shutter to respond.
