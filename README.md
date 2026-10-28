@@ -1,43 +1,56 @@
 # FutureLens
 
-**Tell your camera what to look for.**
+**Describe the moment worth waiting for.**
 
-Describe a scene in plain language. FutureLens watches your Sony camera's live
-view, uses Claude to judge when your condition is met, and triggers the shutter.
-Your camera takes the photograph and sends the original file to your computer.
+The village becomes visible through the fog. Sunrise lights the mountain summit.
+Tell FutureLens what you want to see in the photograph, and let it watch the scene
+for you.
 
-> “Take a photo when a person is visible in the center of the frame.”
+FutureLens uses Claude to evaluate your Sony camera's live view against your
+instruction. Each observation adds a preview to the same conversation, keeping
+earlier views available for comparison. Every sampled preview is also saved locally.
+When Claude identifies a match, your camera takes the photograph and sends the
+original file to your computer.
+
+> “Take one photo when the village below is clearly visible through the fog.”
 
 ## From instruction to photograph
 
 1. **Describe the shot.** Give FutureLens a visual condition to look for.
 2. **Set the session.** Choose how often to inspect the scene, how long to watch,
    and how many photos to take.
-3. **Let the camera shoot.** FutureLens checks fresh previews and requests a
-   photograph when Claude identifies a match.
+3. **Let the camera shoot.** Claude compares the current view with the session's
+   earlier observations and requests a photograph when it identifies a match.
 
-## Ideas to try
+## Moments to capture
 
 | Scene | Example instruction |
 | --- | --- |
-| A portrait session | “Take a photo when the person is facing the camera with both hands raised.” |
-| A tabletop composition | “Take a photo when a red mug is visible in the center of the table.” |
-| A fixed camera watching a doorway | “Take a photo when a person is clearly visible in the doorway.” |
+| A village emerging from fog | “Take one photo when the village below is clearly visible through the fog.” |
+| Sunrise over a mountain | “Capture the mountain when warm sunrise light is visible on its summit.” |
+| Smart timelapse of an apartment building — experimental | “Take one photo of the building each time another apartment goes dark.” |
 
-Each decision uses the current preview, so instructions work best when the
-condition is visible in a single image.
+The fog and sunrise instructions describe a result visible in the current preview:
+the village in view or the summit lit.
+
+**Smart timelapse uses visual history.** Claude sees the session's earlier previews
+and actual capture outcomes before requesting another photograph.
+The aim is a sequence that advances as apartments go dark. This is experimental;
+recognizing every change accurately in a real building still needs field testing.
 
 ## You choose the moment—and the limits
 
-- **Natural-language triggers.** Change what the camera looks for by changing
-  your instruction.
+- **Scene-specific triggers.** Combine subjects, visibility, light, and composition
+  in a plain-language instruction.
+- **A continuous visual history.** Each observation stays in the conversation,
+  with a local copy of every sampled preview.
 - **Original camera files.** Download JPEG, HEIF, RAW, or paired files according
   to your camera's recording and transfer settings.
 - **Adjustable sessions.** Set inspection frequency, session duration, photo
-  limits, and the minimum gap between captures. The default inspection limit is
-  once per second; actual timing depends on camera and AI response time.
-- **Controlled repeat shots.** After a capture, FutureLens waits for the condition
-  to clear before another match can trigger a photo.
+  limits, and the minimum gap between captures. The default is one observation
+  per minute, suited to watching landscapes over time.
+- **Controlled repeat shots.** Claude receives the actual results of earlier
+  capture requests. The app enforces cooldowns and photo limits.
 - **Automatic camera detection.** Connect one supported Sony camera over USB.
   FutureLens checks its capabilities before enabling capture and supports
   autofocus or manual focus, depending on the camera's configuration.
@@ -61,7 +74,10 @@ You set exposure and image format on the camera; FutureLens handles the capture
 decision. It suits scenes that remain visible long enough for a preview to be
 evaluated and the shutter to respond.
 
-AI decisions use Anthropic's Claude API and require your API key. Preview images
-are sent to Anthropic for evaluation; downloaded photographs are saved locally.
+AI decisions use Anthropic's Claude API and require your API key. Each request
+includes the session's accumulated previews and conversation. Sessions stop when
+they reach their configured limits or conversation capacity; earlier observations
+are never silently removed. Preview copies and downloaded photographs are saved
+on your computer.
 
 **[Try FutureLens →](docs/usage.md)** — setup, camera operation, and troubleshooting.

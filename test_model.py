@@ -1,4 +1,4 @@
-"""Offline checks for live-image decisions and API configuration."""
+"""Offline checks for action responses, capacity preflight, and API transport."""
 
 import base64
 import io
@@ -14,10 +14,8 @@ from PIL import Image
 import model
 
 
-def answer(choice):
-    return {"model": "claude-haiku-5-5", "stop_reason": "end_turn", "content": [
-        {"type": "text", "text": json.dumps({"shot": choice})}
-    ]}
+def answer(action):
+    return {"model": model.MODEL, "stop_reason": "end_turn", "content": [model.text_content({"action": action})]}
 
 
 class ModelTests(unittest.TestCase):
@@ -27,42 +25,76 @@ class ModelTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.config = model.ApiConfig(api_key="offline-test-key")
 
-    def test_core_sends_one_image_and_returns_boolean(self):
+    def test_image_encoding_and_cached_conversation_payload(self):
         image = Image.new("RGB", (1920, 1080), "green")
-        with patch("model.call_model", return_value=answer(True)) as api:
-            self.assertIs(model.decide(image, "Photograph the green scene", self.config), True)
-        payload, _ = api.call_args.args
+        messages = [{"role": "user", "content": [model.image_content(image)]}]
+        payload = model.make_payload(messages)
         self.assertEqual(payload["model"], "claude-haiku-5-5")
-        self.assertEqual(len(payload["messages"]), 1)
-        content = payload["messages"][0]["content"]
-        self.assertEqual(content[1]["text"], "User request: Photograph the green scene")
-        images = [item for item in content if item["type"] == "image"]
-        self.assertEqual(len(images), 1)
-        self.assertEqual(images[0]["source"]["media_type"], "image/jpeg")
-        encoded = base64.b64decode(images[0]["source"]["data"])
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+        self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
+        encoded = base64.b64decode(payload["messages"][0]["content"][0]["source"]["data"])
         with Image.open(io.BytesIO(encoded)) as sent:
             self.assertEqual(sent.size, (960, 540))
         self.assertEqual(image.size, (1920, 1080))
         schema = payload["output_config"]["format"]["schema"]
-        self.assertEqual(schema["properties"], {"shot": {"type": "boolean"}})
-        self.assertEqual(schema["required"], ["shot"])
+        self.assertEqual(schema["properties"], {"action": {"type": "string", "enum": ["shoot", "wait"]}})
+        self.assertEqual(schema["required"], ["action"])
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertEqual(payload["output_config"]["effort"], "low")
+        messages.append({"role": "assistant", "content": answer("wait")["content"]})
+        self.assertEqual(len(payload["messages"]), 1)
 
-    def test_refusal_missing_and_non_boolean_answers_are_rejected(self):
-        for value in (True, False):
-            self.assertIs(model.parse_shot(answer(value)), value)
-        invalid = [{}, None, answer("false"), answer(0), answer(None),
-                   {**answer(True), "stop_reason": "refusal"},
-                   {**answer(True), "stop_reason": "max_tokens"},
-                   {**answer(True), "content": [None]},
-                   {**answer(True), "content": []},
-                   {**answer(True), "content": [{"type": "text", "text": '{"shot": true, "extra": 1}'}]},
-                   {**answer(True), "content": [{"type": "text", "text": 'not JSON'}]}]
+    def test_only_one_valid_action_is_accepted(self):
+        for value in ("shoot", "wait"):
+            self.assertEqual(model.parse_action(answer(value)), value)
+        invalid = [{}, None, answer("other"), answer(True), answer(0), answer(None), answer([]),
+                   {**answer("shoot"), "stop_reason": "refusal"},
+                   {**answer("shoot"), "stop_reason": "max_tokens"},
+                   {**answer("shoot"), "stop_reason": "tool_use"},
+                   {**answer("shoot"), "content": [None]},
+                   {**answer("shoot"), "content": []},
+                   {**answer("shoot"), "content": answer("shoot")["content"] * 2}]
+        for text in ('{"action":"shoot","reason":"extra"}', 'not JSON',
+                     '{"action":"wait","action":"shoot"}', '[["action","shoot"]]',
+                     '[{"action":"shoot"}]', '"shoot"'):
+            invalid.append({**answer("shoot"), "content": [{"type": "text", "text": text}]})
         for response in invalid:
             with self.subTest(response=response), self.assertRaises(ValueError):
-                model.parse_shot(response)
+                model.parse_action(response)
+
+    def test_image_and_exact_encoded_byte_capacity(self):
+        payload = model.make_payload([{"role": "user", "content": [model.image_content(Image.new("RGB", (8, 8)))]}])
+        size = len(model.encode_payload(payload))
+        with patch("model.MAX_REQUEST_BYTES", size):
+            self.assertEqual(model.check_capacity(payload), {"images": 1, "request_bytes": size})
+        with patch("model.MAX_REQUEST_BYTES", size - 1), self.assertRaises(model.CapacityReached) as failure:
+            model.check_capacity(payload)
+        self.assertEqual(failure.exception.details, {"resource": "request_bytes", "used": size, "limit": size - 1})
+        image = payload["messages"][0]["content"][0]
+        payload["messages"][0]["content"] = [image] * 600
+        self.assertEqual(model.check_capacity(payload)["images"], 600)
+        payload["messages"][0]["content"].append(image)
+        with self.assertRaises(model.CapacityReached) as failure:
+            model.check_capacity(payload)
+        self.assertEqual(failure.exception.details["resource"], "images")
+        self.assertEqual(len(payload["messages"][0]["content"]), 601)
+
+    def test_token_count_checks_the_same_prompt_format_and_cache_settings(self):
+        payload = model.make_payload([{"role": "user", "content": [model.text_content("sunrise")]}])
+        with patch("model.request.build_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'{"input_tokens":990000}')
+            self.assertEqual(model.count_tokens(payload, self.config, timeout=7), 990000)
+        sent = opener.return_value.open.call_args.args[0]
+        self.assertEqual(sent.full_url, model.TOKEN_COUNT_ENDPOINT)
+        self.assertEqual(json.loads(sent.data), {k: v for k, v in payload.items() if k != "max_tokens"})
+        self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 7)
+        with patch("model._post", return_value={"input_tokens": 990001}), self.assertRaises(model.CapacityReached):
+            model.count_tokens(payload, self.config)
+        for invalid in ({}, None, {"input_tokens": True}, {"input_tokens": -1}, {"input_tokens": "2"}):
+            with self.subTest(response=invalid), patch("model._post", return_value=invalid), self.assertRaises(ValueError):
+                model.count_tokens(payload, self.config)
 
     @patch.dict("os.environ", {}, clear=True)
     def test_anthropic_config_and_literal_env_values(self):
@@ -80,28 +112,31 @@ class ModelTests(unittest.TestCase):
                        'ANTHROPIC_BASE_URL=https://example.com/another-gateway/v1\n'
                        'ANTHROPIC_MODEL=another-model\n')
         config = model.load_config(env)
+        payload = model.make_payload([])
         with patch("model.request.build_opener") as opener:
-            opener.return_value.open.return_value = io.BytesIO(json.dumps(answer(False)).encode())
-            self.assertIs(model.decide(Image.new("RGB", (32, 32)), "person visible", config), False)
+            opener.return_value.open.return_value = io.BytesIO(json.dumps(answer("wait")).encode())
+            response = model.call_model(payload, config, timeout=2.5)
+            self.assertEqual(model.parse_action(response), "wait")
+            self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 2.5)
         sent = opener.return_value.open.call_args.args[0]
         self.assertEqual(sent.full_url, "https://api.anthropic.com/v1/messages")
+        self.assertEqual(sent.data, model.encode_payload(payload))
         self.assertEqual(json.loads(sent.data)["model"], "claude-haiku-5-5")
         self.assertEqual(sent.get_header("X-api-key"), "test-key")
         self.assertEqual(sent.get_header("Anthropic-version"), model.API_VERSION)
         self.assertEqual(sent.get_header("Anthropic-workspace-id"), "wrkspc_test")
-        self.assertTrue(sent.get_header("User-agent").startswith("FutureLens/"))
 
     @patch.dict("os.environ", {}, clear=True)
-    def test_anthropic_key_is_required(self):
-        env = self.root / ".env"
-        config = model.load_config(env)
-        with patch("model.call_model") as call, self.assertRaises(ValueError):
-            model.decide(Image.new("RGB", (32, 32)), "person visible", config)
-        call.assert_not_called()
+    def test_both_endpoints_require_a_key(self):
+        config = model.load_config(self.root / ".env")
+        for call in (model.call_model, model.count_tokens):
+            with patch("model.request.build_opener") as opener, self.assertRaises(ValueError):
+                call({}, config)
+            opener.assert_not_called()
 
     def test_rate_limit_diagnostics_do_not_expose_provider_text(self):
         body = {"error": {"type": "rate_limit_error", "message": "secret-key and private image data"}}
-        exc = HTTPError("https://api.anthropic.com/v1/messages", 429, "Too Many Requests",
+        exc = HTTPError(model.API_ENDPOINT, 429, "Too Many Requests",
                         {"retry-after": "12", "request-id": "req_12345678"}, io.BytesIO(json.dumps(body).encode()))
         with patch("model.request.build_opener") as opener:
             opener.return_value.open.side_effect = exc
@@ -111,10 +146,11 @@ class ModelTests(unittest.TestCase):
                                                    "retry_after_s": 12.0, "request_id": "req_12345678"})
         self.assertNotIn("secret-key", str(caught.exception))
         self.assertNotIn("private image", str(caught.exception))
+        self.assertEqual(opener.return_value.open.call_count, 1)
 
     def test_billing_diagnostics_classify_without_logging_error_message(self):
         body = {"error": {"type": "invalid_request_error", "message": "Your credit balance is too low. secret-key"}}
-        exc = HTTPError("https://api.anthropic.com/v1/messages", 400, "Bad Request", {}, io.BytesIO(json.dumps(body).encode()))
+        exc = HTTPError(model.API_ENDPOINT, 400, "Bad Request", {}, io.BytesIO(json.dumps(body).encode()))
         failure = model.api_error(exc)
         self.assertEqual(failure.details["reason"], "insufficient_credits")
         self.assertNotIn("secret-key", str(failure))
