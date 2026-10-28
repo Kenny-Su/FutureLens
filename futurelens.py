@@ -27,7 +27,16 @@ def capture_outcome(entry):
                                       "shutter_sent_at", "saved_files") if key in entry}
 
 
-def run_camera(args, config, output, report):
+class SessionStopped(Exception):
+    """A UI stop request, handled between camera/API operations."""
+
+
+def check_stop(stop_event):
+    if stop_event is not None and stop_event.is_set():
+        raise SessionStopped()
+
+
+def run_camera(args, config, output, report, stop_event=None):
     captures = calls = token_checks = 0
     last_capture = -math.inf
     messages = []
@@ -35,7 +44,8 @@ def run_camera(args, config, output, report):
     with SonyCamera(output / "moments", enable_capture=not args.dry_run,
                     helper=args.camera_helper) as camera:
         report.update(camera_model=camera.model, source=f"sony:usb:{camera.model}",
-                      camera_capabilities=camera.capabilities)
+                      camera_capabilities=camera.capabilities,
+                      monitoring_started_at=datetime.now(timezone.utc).isoformat())
         write_json(output / "results.json", report)
         start = time.monotonic()
         deadline = start + args.duration
@@ -46,17 +56,26 @@ def run_camera(args, config, output, report):
             archive.record_message({"role": "system", "content": [{"type": "text", "text": INSTRUCTIONS}]})
         try:
             while time.monotonic() < deadline:
+                check_stop(stop_event)
                 if not args.dry_run and calls >= args.max_requests:
                     report["stop_reason"] = "max_requests"
                     break
                 now = time.monotonic()
                 if now < next_sample:
-                    time.sleep(min(next_sample - now, deadline - now))
+                    delay = min(next_sample - now, deadline - now)
+                    if stop_event is None:
+                        time.sleep(delay)
+                    else:
+                        stop_event.wait(delay)
+                check_stop(stop_event)
                 if time.monotonic() >= deadline:
                     break
+                report.update(phase="observing", next_observation_at=None)
+                write_json(output / "results.json", report)
                 preview = archive.append(camera.latest_frame())
                 entry = {**preview.metadata(), "preview_file": str(preview.path.relative_to(output))}
                 report["observations"].append(entry)
+                report["previews_saved"] = archive.count
                 write_json(output / "results.json", report)
                 if not args.dry_run:
                     content = []
@@ -69,6 +88,7 @@ def run_camera(args, config, output, report):
                     messages.append(message)
                     archive.record_message(message, preview)
                     pending_outcome = None
+                    check_stop(stop_event)
                     if time.monotonic() >= deadline:
                         entry["status"] = "skipped_duration_expired"
                         break
@@ -79,18 +99,35 @@ def run_camera(args, config, output, report):
                         if remaining <= 0:
                             entry["status"] = "skipped_duration_expired"
                             break
+                        report["phase"] = "checking"
+                        write_json(output / "results.json", report)
+                        check_stop(stop_event)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            entry["status"] = "skipped_duration_expired"
+                            break
                         token_checks += 1
+                        report["token_count_requests"] = token_checks
                         entry["input_tokens"] = count_tokens(payload, config, timeout=min(90, remaining))
                     except CapacityReached as exc:
                         report.update(status="capacity_reached", stop_reason="capacity_reached", capacity=exc.details)
                         entry["status"] = "capacity_reached"
                         break
+                    check_stop(stop_event)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         entry["status"] = "skipped_duration_expired"
                         break
+                    report["phase"] = "thinking"
+                    write_json(output / "results.json", report)
+                    check_stop(stop_event)
                     before = time.monotonic()
+                    remaining = deadline - before
+                    if remaining <= 0:
+                        entry["status"] = "skipped_duration_expired"
+                        break
                     calls += 1
+                    report["api_requests"] = calls
                     response = call_model(payload, config, timeout=min(90, remaining))
                     action = parse_action(response)
                     now = time.monotonic()
@@ -100,6 +137,10 @@ def run_camera(args, config, output, report):
                     messages.append(message)
                     archive.record_message(message)
                     pending_outcome = entry
+                    if stop_event is not None and stop_event.is_set():
+                        if action == "shoot":
+                            entry["capture_status"] = "skipped_user_stop"
+                        check_stop(stop_event)
                     if action == "shoot":
                         if now >= deadline:
                             entry["capture_status"] = "skipped_duration_expired"
@@ -109,6 +150,7 @@ def run_camera(args, config, output, report):
                             entry["capture_status"] = "skipped_cooldown"
                         else:
                             entry.update(capture_status="requested", capture_id=captures)
+                            report["phase"] = "capturing"
                             write_json(output / "results.json", report)
 
                             def on_shutter():
@@ -117,6 +159,9 @@ def run_camera(args, config, output, report):
                                 write_json(output / "results.json", report)
 
                             remaining = min(deadline, preview.received_at + args.max_frame_age) - time.monotonic()
+                            if stop_event is not None and stop_event.is_set():
+                                entry["capture_status"] = "skipped_user_stop"
+                                check_stop(stop_event)
                             if remaining <= 0:
                                 entry["capture_status"] = "skipped_expired_before_shutter"
                             else:
@@ -129,17 +174,21 @@ def run_camera(args, config, output, report):
                                 entry.update(capture_status="downloaded",
                                              saved_files=[str(p.relative_to(output)) for p in files])
                                 captures += 1
+                                report["photos_taken"] = captures
                                 last_capture = time.monotonic()
                                 archive.record_capture(entry["capture_id"], preview, files)
                     print(json.dumps(capture_outcome(entry)), flush=True)
+                    check_stop(stop_event)
                     if captures >= args.max_shots:
                         report["stop_reason"] = "max_shots"
                         break
-                write_json(output / "results.json", report)
+                check_stop(stop_event)
                 # Stay on the session's schedule; never burst through missed slots.
                 next_sample += args.interval
                 if next_sample < time.monotonic():
                     next_sample = start + math.ceil((time.monotonic() - start) / args.interval) * args.interval
+                report.update(phase="waiting", next_observation_at=time.time() + max(0, next_sample - time.monotonic()))
+                write_json(output / "results.json", report)
         finally:
             report.update(previews_saved=archive.count, preview_index="previews/index.jsonl",
                           photos_taken=captures, api_requests=calls, token_count_requests=token_checks)
@@ -157,7 +206,7 @@ def run_camera(args, config, output, report):
     return output
 
 
-def run(args) -> Path:
+def run(args, stop_event=None) -> Path:
     config = None if args.dry_run else load_config()
     if not args.dry_run:
         validate_config(config)
@@ -165,7 +214,7 @@ def run(args) -> Path:
     output.mkdir(parents=True, exist_ok=False)
     (output / "moments").mkdir()
     report = {
-        "status": "running", "mode": "sony_usb",
+        "status": "running", "phase": "connecting", "mode": "sony_usb",
         "prompt_version": "claude-conversation-v1", "provider": "anthropic", "model": MODEL,
         "model_settings": {"effort": "low", "thinking": "disabled", "automatic_prompt_caching": True},
         "api_host": urlsplit(API_ENDPOINT).hostname,
@@ -174,14 +223,19 @@ def run(args) -> Path:
         "settings": {key: getattr(args, key) for key in
                      ("duration", "interval", "max_requests", "cooldown", "max_frame_age", "max_shots")},
         "capacity_limits": {"images": MAX_IMAGES, "request_bytes": MAX_REQUEST_BYTES, "input_tokens": MAX_INPUT_TOKENS},
-        "observations": [],
+        "observations": [], "previews_saved": 0, "photos_taken": 0,
+        "api_requests": 0, "token_count_requests": 0,
     }
     if not args.dry_run:
         report["conversation_file"] = "conversation.jsonl"
     write_json(output / "results.json", report)
     print(f"Output: {output}", file=sys.stderr)
     try:
-        return run_camera(args, config, output, report)
+        check_stop(stop_event)
+        return run_camera(args, config, output, report, stop_event)
+    except SessionStopped:
+        report.update(status="stopped", stop_reason="user_stop")
+        return output
     except KeyboardInterrupt:
         report["status"] = "interrupted"
         write_json(output / "results.json", report)
@@ -195,6 +249,10 @@ def run(args) -> Path:
             report["api_error"] = exc.details
         write_json(output / "results.json", report)
         raise
+    finally:
+        report.update(phase="finished", next_observation_at=None,
+                      ended_at=datetime.now(timezone.utc).isoformat())
+        write_json(output / "results.json", report)
 
 
 def parse_args(argv=None):

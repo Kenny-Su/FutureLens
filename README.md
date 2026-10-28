@@ -21,6 +21,9 @@ original file to your computer.
    and how many photos to take.
 3. **Let the camera shoot.** Claude compares the current view with the session's
    earlier observations and requests a photograph when it identifies a match.
+4. **Watch the story unfold.** Browse a timeline of every preview. Saved photographs
+   stand out, with access to the original files. Exploring earlier frames keeps
+   monitoring running.
 
 ## Moments to capture
 
@@ -56,6 +59,9 @@ recognizing every change accurately in a real building still needs field testing
   autofocus or manual focus, depending on the camera's configuration.
 - **A record of every session.** Review decisions, capture outcomes, and downloaded
   files. Local preview checks help you check framing before an automated session.
+- **A quiet camera workspace.** Set your instruction and limits, then move into
+  a focused monitor with the latest preview, session progress, and a visual timeline.
+  A photo is highlighted only after its download succeeds.
 
 ## Sony camera support
 
@@ -69,7 +75,8 @@ settings, and installed SDK version.
 
 ## Available today
 
-FutureLens is an early command-line tool for **macOS and one Sony USB camera**.
+FutureLens is an early camera tool for **macOS and one Sony USB camera**, with a
+local browser interface and a command-line interface.
 You set exposure and image format on the camera; FutureLens handles the capture
 decision. It suits scenes that remain visible long enough for a preview to be
 evaluated and the shutter to respond.

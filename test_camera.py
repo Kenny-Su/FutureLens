@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -334,6 +335,85 @@ class CameraWorkflowTests(unittest.TestCase):
             fl.run(self.args())
         self.assertEqual(self.report()["status"], "interrupted")
         self.assertEqual(self.camera.captures, [])
+        self.assertTrue(self.camera.closed)
+
+    def test_ui_stop_before_connection_never_opens_camera(self):
+        stop = threading.Event()
+        stop.set()
+        fl.run(self.args(), stop_event=stop)
+        self.factory.assert_not_called()
+        self.assertEqual(self.report()["status"], "stopped")
+
+    def test_ui_stop_interrupts_interval_wait(self):
+        stop = threading.Event()
+        with patch.object(stop, "wait", side_effect=lambda _: stop.set()):
+            fl.run(self.args(), stop_event=stop)
+        self.assertEqual(self.camera.frames, 1)
+        self.assertEqual(len(self.inferences()), 1)
+        self.assertEqual(self.report()["stop_reason"], "user_stop")
+        self.assertTrue(self.camera.closed)
+
+    def test_ui_stop_during_count_prevents_inference(self):
+        stop = threading.Event()
+        def count(*_, **__):
+            stop.set()
+            return 1000
+        with patch("futurelens.count_tokens", side_effect=count):
+            fl.run(self.args(), stop_event=stop)
+        self.assertEqual(self.inferences(), [])
+        self.assertEqual(self.camera.captures, [])
+        self.assertEqual(self.report()["status"], "stopped")
+
+    def test_ui_stop_during_preview_preserves_observation_in_history(self):
+        stop = threading.Event()
+        frame = self.camera.latest_frame
+        def stopped_frame():
+            stop.set()
+            return frame()
+        with patch.object(self.camera, "latest_frame", side_effect=stopped_frame):
+            fl.run(self.args(), stop_event=stop)
+        self.assertEqual(self.inferences(), [])
+        self.assertEqual(self.report()["previews_saved"], 1)
+        self.assertEqual(self.journal()[-1]["content"][-1], {"type": "image", "file": "previews/000000.jpg"})
+
+    def test_ui_stop_during_inference_does_not_execute_returned_shoot(self):
+        stop = threading.Event()
+        def inference(*_, **__):
+            stop.set()
+            return answer("shoot")
+        with patch("futurelens.call_model", side_effect=inference):
+            fl.run(self.args(), stop_event=stop)
+        self.assertEqual(self.camera.captures, [])
+        self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_user_stop")
+        self.assertIn("skipped_user_stop", self.journal()[-1]["content"][0]["text"])
+
+    def test_ui_stop_immediately_before_shutter_prevents_capture(self):
+        self.action = "shoot"
+        stop = threading.Event()
+        write = fl.write_json
+        def stopping_write(path, report):
+            write(path, report)
+            if report.get("observations") and report["observations"][-1].get("capture_status") == "requested":
+                stop.set()
+        with patch("futurelens.write_json", side_effect=stopping_write):
+            fl.run(self.args(), stop_event=stop)
+        self.assertEqual(self.camera.captures, [])
+        self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_user_stop")
+
+    def test_ui_stop_after_shutter_preserves_completed_download(self):
+        self.action = "shoot"
+        stop = threading.Event()
+        capture = self.camera.capture
+        def stopping_capture(*args, **kwargs):
+            stop.set()
+            return capture(*args, **kwargs)
+        with patch.object(self.camera, "capture", side_effect=stopping_capture):
+            fl.run(self.args(), stop_event=stop)
+        self.assertEqual(self.camera.captures, [0])
+        self.assertEqual(self.report()["status"], "stopped")
+        self.assertEqual(self.report()["photos_taken"], 1)
+        self.assertEqual(self.report()["observations"][0]["capture_status"], "downloaded")
+        self.assertIn("downloaded", self.journal()[-1]["content"][0]["text"])
         self.assertTrue(self.camera.closed)
 
     def test_existing_output_is_never_overwritten(self):
