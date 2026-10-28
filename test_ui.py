@@ -11,7 +11,9 @@ from unittest.mock import patch
 from PIL import Image
 
 from model import ApiConfig
-from ui import LocalServer, SessionManager, session_args
+from test_camera import Clock, FakeCamera
+from test_model import answer
+from ui import LocalServer, SessionManager, session_settings
 
 
 class InterfaceTests(unittest.TestCase):
@@ -28,22 +30,52 @@ class InterfaceTests(unittest.TestCase):
         self.addCleanup(config.stop)
 
     def test_settings_validate_before_camera_or_api_work(self):
-        args = session_args({"request": "scene"}, self.root / "session", self.helper)
-        self.assertEqual((args.interval, args.duration, args.max_shots, args.max_requests), (60, 3600, 1, 60))
+        settings = session_settings({"request": "scene"})
+        self.assertEqual((settings.interval, settings.duration, settings.max_shots, settings.max_requests), (60, 3600, 1, 60))
         for settings in ({"request": ""}, {"request": 1}, {"request": "x", "interval": -1},
                          {"request": "x", "interval": True}, {"request": "x", "duration_minutes": float("nan")},
-                         {"request": "x", "max_shots": 1.5}, {"request": "x", "output": "/tmp/x"}, []):
+                         {"request": "x", "duration_minutes": True},
+                         {"request": "x", "duration_minutes": "10"},
+                         {"request": "x", "duration_minutes": 10**400},
+                         {"request": "x", "max_shots": 1.5}, {"request": "x", "output": "/tmp/x"},
+                         {"request": "x", "dry_run": True}, {"request": "x", "camera_helper": "other"}, []):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 self.manager.start(settings)
         self.assertIsNone(self.manager.operation)
         self.assertFalse(self.manager.output_root.exists())
 
+    def test_ui_settings_drive_real_engine_and_saved_photo_report(self):
+        clock = Clock()
+        def camera(output, **kwargs):
+            self.assertTrue(kwargs["enable_capture"])
+            self.assertEqual(kwargs["helper"], self.helper)
+            return FakeCamera(clock, output.parent)
+        with patch("futurelens.SonyCamera", side_effect=camera), \
+                patch("futurelens.load_config", return_value=ApiConfig(api_key="offline-test")), \
+                patch("futurelens.count_tokens", return_value=1000), \
+                patch("futurelens.call_model", return_value=answer("shoot")) as inference, \
+                patch("futurelens.time.monotonic", side_effect=clock.monotonic):
+            self.manager.start({"request": "Capture this scene", "duration_minutes": 2,
+                                "interval": 45, "max_shots": 1, "max_requests": 3})
+            self.manager.worker.join(2)
+            self.assertFalse(self.manager.worker.is_alive())
+        state = self.manager.state()
+        self.assertIsNone(state["error"])
+        report = state["report"]
+        self.assertEqual((report["settings"]["duration"], report["settings"]["interval"]), (120, 45))
+        self.assertEqual((report["status"], report["stop_reason"], report["photos_taken"]),
+                         ("completed", "max_shots", 1))
+        entry = report["observations"][0]
+        self.assertEqual(entry["capture_status"], "downloaded")
+        self.assertTrue(self.manager.media_file(state["session_id"], entry["saved_files"][0]).is_file())
+        inference.assert_called_once()
+
     def test_only_one_session_owns_camera_and_stop_reaches_runner(self):
         entered = threading.Event()
-        def runner(args, stop_event):
+        def runner(settings, output, *, camera_helper, stop_event):
             entered.set()
             self.assertTrue(stop_event.wait(2))
-        with patch("ui.run", side_effect=runner) as run:
+        with patch("ui.run_session", side_effect=runner) as run:
             self.manager.start({"request": "scene"})
             self.assertTrue(entered.wait(1))
             with self.assertRaises(ValueError):
@@ -71,7 +103,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue((self.manager.check_output / "preview.jpg").exists())
 
     def test_failures_release_session_and_do_not_expose_credentials(self):
-        with patch("ui.run", side_effect=RuntimeError("Camera unavailable")):
+        with patch("ui.run_session", side_effect=RuntimeError("Camera unavailable")):
             self.manager.start({"request": "scene"})
             self.manager.close()
         state = self.manager.state()

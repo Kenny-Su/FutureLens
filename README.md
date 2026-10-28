@@ -50,7 +50,7 @@ recognizing every change accurately in a real building still needs field testing
 - **Original camera files.** Download JPEG, HEIF, RAW, or paired files according
   to your camera's recording and transfer settings.
 - **Adjustable sessions.** Set inspection frequency, session duration, photo
-  limits, and the minimum gap between captures. The default is one observation
+  limits, and the observation budget. The default is one observation
   per minute, suited to watching landscapes over time.
 - **Controlled repeat shots.** Claude receives the actual results of earlier
   capture requests. The app enforces cooldowns and photo limits.
@@ -75,8 +75,8 @@ settings, and installed SDK version.
 
 ## Available today
 
-FutureLens is an early camera tool for **macOS and one Sony USB camera**, with a
-local browser interface and a command-line interface.
+FutureLens is an early camera tool for **macOS and one Sony USB camera**, controlled
+through a local browser interface.
 You set exposure and image format on the camera; FutureLens handles the capture
 decision. It suits scenes that remain visible long enough for a preview to be
 evaluated and the shutter to respond.

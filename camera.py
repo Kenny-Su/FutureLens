@@ -1,8 +1,6 @@
 """Auto-detect a Sony USB camera and check its live-view/photo capabilities."""
 
-import argparse
 from dataclasses import dataclass
-from datetime import datetime
 import io
 import json
 import math
@@ -180,38 +178,3 @@ class SonyCamera:
 
     def __exit__(self, *_):
         self.close()
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", action="store_true", help="Also trigger exactly one real photograph")
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    output = (args.output or Path("outputs") / datetime.now().strftime("sony-%Y%m%d-%H%M%S-%f")).resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    report = {"status": "running", "capture_requested": args.capture}
-    try:
-        with SonyCamera(output / "moments", enable_capture=args.capture) as camera:
-            report["camera"] = camera.model
-            report["capabilities"] = camera.capabilities
-            frame = camera.latest_frame()
-            frame.image.save(output / "preview.jpg", quality=95)
-            report["preview_size"] = list(frame.image.size)
-            print(f"Connected to {camera.model}; preview saved: {output / 'preview.jpg'}", flush=True)
-            if args.capture:
-                report["files"] = [str(p.relative_to(output)) for p in camera.capture(0)]
-            report["status"] = "completed"
-    except (RuntimeError, OSError) as exc:
-        report.update(status="failed", error=str(exc))
-        if isinstance(exc, CameraError):
-            report.update(camera=exc.model, capabilities=exc.capabilities)
-        print(json.dumps(report), flush=True)
-        return 1
-    finally:
-        (output / "camera-test.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps(report), flush=True)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

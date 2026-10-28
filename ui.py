@@ -4,7 +4,6 @@ import argparse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import math
 import mimetypes
 from pathlib import Path
 import secrets
@@ -13,34 +12,21 @@ from urllib.parse import unquote, urlsplit
 import webbrowser
 
 from camera import SonyCamera, DEFAULT_HELPER
-from futurelens import parse_args, run
+from futurelens import SessionSettings, run_session
 from model import load_config, validate_config
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "web"
 
 
-def session_args(data, output, helper):
+def session_settings(data):
     if not isinstance(data, dict) or set(data) - {"request", "interval", "duration_minutes", "max_shots", "max_requests"}:
         raise ValueError("Invalid session settings.")
-    instruction = data.get("request", "")
-    if not isinstance(instruction, str) or not instruction.strip() or len(instruction) > 8000:
-        raise ValueError("Enter an instruction (up to 8,000 characters).")
-    values = {}
-    for name, default in (("interval", 60), ("duration_minutes", 60), ("max_shots", 1), ("max_requests", 60)):
-        value = data.get(name, default)
-        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-            raise ValueError(f"{name.replace('_', ' ').capitalize()} must be a positive number.")
-        if name in ("max_shots", "max_requests") and int(value) != value:
-            raise ValueError("Photo and observation limits must be whole numbers.")
-        values[name] = value
-    if not math.isfinite(values["duration_minutes"] * 60):
-        raise ValueError("Duration is too large.")
-    return parse_args(["--request", instruction.strip(), "--output", str(output),
-                       "--camera-helper", str(helper), "--interval", str(values["interval"]),
-                       "--duration", str(values["duration_minutes"] * 60),
-                       "--max-shots", str(int(values["max_shots"])),
-                       "--max-requests", str(int(values["max_requests"]))])
+    values = dict(data)
+    minutes = values.pop("duration_minutes", 60)
+    if type(minutes) not in (int, float):
+        raise ValueError("Duration must be a positive number of minutes.")
+    return SessionSettings(**{"request": "", **values, "duration": minutes * 60})
 
 
 class SessionManager:
@@ -73,17 +59,17 @@ class SessionManager:
             if self.operation is not None:
                 raise ValueError("A camera operation is already running.")
             output = self._folder("session")
-            args = session_args(data, output, self.helper)
+            settings = session_settings(data)
             validate_config(load_config())
             if not self.helper.is_file():
                 raise ValueError("Build the Sony camera helper first. See docs/usage.md.")
             self.output, self.error = output, None
             self.stop_event = threading.Event()
-            self._launch("monitor", lambda: self._monitor(args))
+            self._launch("monitor", lambda: self._monitor(settings))
 
-    def _monitor(self, args):
+    def _monitor(self, settings):
         try:
-            run(args, stop_event=self.stop_event)
+            run_session(settings, self.output, camera_helper=self.helper, stop_event=self.stop_event)
         except Exception as exc:
             with self.lock:
                 self.error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__

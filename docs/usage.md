@@ -4,7 +4,7 @@
 
 This guide covers setup, camera operation, troubleshooting, and development.
 Run the commands from the repository root. FutureLens runs on macOS and controls
-one Sony camera over USB, through a local browser interface or the CLI.
+one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. FutureLens uses its Messages API with
 **Claude Haiku 5.5** (`claude-haiku-5-5`). One conversation holds your instruction,
@@ -89,33 +89,12 @@ options, file type, and focus controls. It validates allowed property values as 
 finish before capture settings are changed, and run again before each shutter
 command. Startup failures stop the run with an explanation before any model
 request; later setting changes can stop a capture before the shutter command. A camera with live view
-but no supported still-photo workflow can still be used in preview/dry-run mode.
+but no supported still-photo workflow can still show a preview through **Check connection**.
 
 Autofocus requires remote half-press and readable focus confirmation. If either is
 unavailable, select MF on the camera; the app does not change the focus mode for you.
 SDK compatibility alone does not guarantee this particular still-photo workflow.
 Offline tests cover different capability combinations.
-
-Check detection, capabilities, and a preview locally, without an API call or shutter command:
-
-```bash
-.venv/bin/python camera.py
-```
-
-Add `--capture` to take **one actual test photograph** and download it. Each test
-creates a new output directory containing `preview.jpg`, `camera-test.json`,
-`camera-sdk.log`, and any downloaded photos under `moments/`. `camera-test.json`
-records the actual model and capability assessment, including reasons capture is
-unavailable. Preview mode does not change capture settings.
-
-For example, watch for a village to become visible through fog for up to
-30 minutes, stopping after one photograph:
-
-```bash
-.venv/bin/python futurelens.py \
-  --request "Take one photo when the village below is clearly visible through the fog" \
-  --duration 1800 --interval 60 --max-requests 30 --max-shots 1
-```
 
 ## Camera interface
 
@@ -126,7 +105,9 @@ After setup and building the camera helper, launch the local interface:
 ```
 
 It opens `http://127.0.0.1:8765` in your browser. Use `--no-open` to open it yourself,
-or `--port 8766` to choose another port. Keep the terminal running.
+or `--port 8766` to choose another port. Keep the terminal running. This command
+only launches the interface; instructions, settings, connection checks, and monitoring
+are controlled in the browser.
 
 1. Enter an instruction, or choose an example. Set the observation interval in
    **seconds**, duration in **minutes**, and photo limit. Defaults are 60 seconds,
@@ -153,7 +134,7 @@ closes the server. Starting a new session keeps previous session files on disk;
 the first version of the interface only browses the current server session.
 
 The interface uses Python's standard-library HTTP server and plain HTML/CSS/JavaScript.
-It reuses the CLI's monitoring loop in one worker thread. There is no Node build step
+It passes validated settings directly to the monitoring engine in one worker thread. There is no Node build step
 or extra Python dependency. The server binds only to loopback, checks request origins
 and a per-server control token, and serves only recorded previews and confirmed
 photo files. API credentials remain in Python; they are never sent to the browser.
@@ -162,7 +143,7 @@ The interface itself loads no external fonts, scripts, or analytics.
 ## The observation loop
 
 The first observation happens immediately after camera setup. Subsequent observations
-follow `--interval` seconds on the session's schedule (default **60 seconds**):
+follow the **Observe every** setting on the session's schedule (default **60 seconds**):
 
 1. Retrieve a fresh camera preview and save it locally.
 2. Append its timestamp and image to the ongoing conversation, along with the actual
@@ -178,19 +159,15 @@ An operation that overruns a scheduled observation skips that slot; there are no
 catch-up bursts. Every sampled preview is retained, but the program does not save
 every frame from the camera's live stream. Events between observations may be missed.
 
-`--duration` defaults to **3600 seconds**, measured after connection/setup.
-`--max-requests` defaults to **60 inference calls**; token-count checks are recorded
-separately and do not consume that budget. `--max-shots` defaults to **one**; increase
+**Watch for** defaults to **60 minutes**, measured after connection/setup.
+The **observation budget** defaults to **60 inference calls**; token-count checks are recorded
+separately and do not consume that budget. **Photo limit** defaults to **one**; increase
 it for a sequence. The first reached limit ends the session. An in-flight operation
 may take time to finish after the deadline, but cannot authorize a new shutter
 command after expiry.
 
-`--dry-run` saves previews at the same interval without loading credentials, making
-API calls, sending shutter commands, or changing capture settings. It runs for the
-configured duration; the inference-call budget does not limit a dry run.
-
-The CLI uses `--interval` in seconds. The old `--fps`, `--max-agent-turns`, and
-`--max-context-images` options have been removed.
+Use **Check connection** for a local preview without an API key, inference call,
+shutter command, or changes to capture settings.
 
 ## Conversation history and capacity
 
@@ -233,13 +210,13 @@ resuming old sessions is not implemented.
 
 A `shoot` action requests one photo of the newest observation. The application
 rejects it when the monitoring duration has expired, the preview is older than
-`--max-frame-age` (default **30 seconds**), or the capture cooldown is active.
+**30 seconds**, or the capture cooldown is active.
 Freshness includes preview retrieval, token counting, and inference time. It is
 checked again immediately before shutter preparation, and the remaining allowance
 is passed to the helper so autofocus cannot silently use up the deadline.
 This age measures elapsed host time, not the sensor's exact exposure timestamp.
 
-`--cooldown` defaults to **5 seconds** between completed captures. There is at most
+The capture cooldown is **5 seconds** between completed captures. There is at most
 one shutter attempt per observation. Claude receives the actual result, such as
 `downloaded` or `skipped_stale_frame`, with the next preview. A request to shoot is
 not reported as a successful photograph until its files download. Consecutive
@@ -271,8 +248,8 @@ trigger preview IDs and saved files.
 
 Only a completed download with a nonempty file counts as a successful capture.
 Timeouts or disconnects stop the run without retrying an uncertain shutter command;
-a photo may still be on the memory card after a transfer failure. Ctrl-C closes the
-session; an already started capture may need time to finish and release the shutter.
+a photo may still be on the memory card after a transfer failure. **Stop session**
+ends monitoring; an already started capture may need time to finish and release the shutter.
 Storage failures also stop the run. Credentials, encoded image data, and free-form
 provider error text are not written to the logs.
 
@@ -292,14 +269,14 @@ an app is blocking the SDK.
 ## Code and checks
 
 Our native bridge uses Sony's SDK headers and libraries directly. It provides the
-persistent Python command interface, USB selection, capability checks, and capture
+persistent internal process protocol, USB selection, capability checks, and capture
 safeguards. Claude decisions, timing, and capture limits remain in Python.
 
 - `model.py`: fixed Anthropic transport, cached conversation payloads, action parsing, and capacity checks.
 - `history.py`: append-only preview archive, conversation journal, and capture records.
-- `futurelens.py`: Sony camera CLI, timing, capture policy, and result recording.
+- `futurelens.py`: validated session settings, monitoring, capture policy, and result recording.
 - `ui.py` / `web/`: local camera interface, session controls, and preview timeline.
-- `camera.py`: persistent SDK-process adapter and offline camera smoke test.
+- `camera.py`: persistent SDK-process adapter used by the interface and monitoring engine.
 - `native/sony_camera.cpp`: USB connection, live view, autofocus/shutter, and downloads.
 - `native/camera_capabilities.h`: USB selection and capability-based capture policy.
 - `scripts/build_sony.py`: local macOS helper build using the downloaded SDK and `clang++`.
