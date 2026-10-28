@@ -7,12 +7,12 @@ Run the commands from the repository root. FutureLens runs on macOS and controls
 one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. FutureLens uses its Messages API with
-**Claude Haiku 5.5** (`claude-haiku-5-5`). One conversation holds your instruction,
-timestamped previews, model actions, and actual capture outcomes for the whole session.
-Each observation produces one response: `{"action":"shoot"}` or `{"action":"wait"}`.
-There are no model-written explanations or history-retrieval tools. Low effort and
-disabled thinking remain configured. Refusals, malformed actions, and API failures
-stop the run with an error.
+**Claude Haiku 5.5** (`claude-haiku-5-5`). Each observation starts a fresh conversation
+with the instruction, current preview, session limits, history availability, and
+latest factual capture outcome. Claude can list history, retrieve earlier images,
+or request a photograph. An ordinary end of turn finishes the observation without
+shooting. No explanations are required. Low effort and disabled thinking remain
+configured. Refusals, malformed responses, and API failures end monitoring.
 
 ## Camera compatibility
 
@@ -41,7 +41,7 @@ Dependencies stay in `.venv`. Configure the project `.env`:
 ANTHROPIC_API_KEY=your-key
 ```
 
-The accumulated conversation, including earlier preview images, goes directly to
+The current run's conversation, including any retrieved preview images, goes directly to
 `https://api.anthropic.com/v1/messages` using `claude-haiku-5-5`. A capacity check
 sends the same input to `/v1/messages/count_tokens` before each inference.
 The endpoint and model are fixed in code. Environment variables override `.env`
@@ -111,14 +111,20 @@ are controlled in the browser.
 
 1. Enter an instruction, or choose an example. Set the observation interval in
    **seconds**, duration in **minutes**, and photo limit. Defaults are 60 seconds,
-   60 minutes, and one photo. The expandable observation budget defaults to 60 AI checks.
+   60 minutes, and one photo. Under **AI budget**, **Maximum AI calls** defaults to 360.
+   Each observation can use up to six calls; the header counts calls and previews separately.
 2. Optionally **Check connection** to detect the camera, assess capabilities, and
    see a preview. This does not call Claude, enable capture, or take a photo.
    The connection is released afterward and checked again when monitoring starts.
-3. **Start monitoring** opens the session view. The large image shows the latest
-   sampled preview, updated at your chosen interval; it is not a continuous video feed.
-4. Select any timeline thumbnail to inspect it. Monitoring keeps running while
-   you browse. **Return to latest** resumes following new previews.
+3. **Start monitoring** opens a horizontal timeline. Each saved preview creates one
+   card with its run's vertical activity trace beneath the image. The latest card
+   expands automatically; older cards can be independently expanded or collapsed.
+   The timeline shows sampled observations, not a continuous video feed.
+4. Open any thumbnail in the image viewer. History retrievals appear inside the
+   requesting card, with thumbnails and links back to their original observations.
+   Scrolling back preserves your position while monitoring continues. **Return to
+   latest** resumes following new previews. Cards blocked before inference show
+   **Not sent**; run limits, expired previews, and failures have distinct outcomes.
 5. Green photo markers indicate confirmed downloads, linked to their triggering
    preview. Select one to download its original JPEG, HEIF, RAW, or paired files.
    A model's `shoot` request or an unconfirmed shutter is not marked as a saved photo.
@@ -146,12 +152,14 @@ The first observation happens immediately after camera setup. Subsequent observa
 follow the **Observe every** setting on the session's schedule (default **60 seconds**):
 
 1. Retrieve a fresh camera preview and save it locally.
-2. Append its timestamp and image to the ongoing conversation, along with the actual
-   outcome of the previous action. Your instruction appears at the start of the chat.
-3. Check conversation capacity, then call Claude once for `shoot` or `wait`.
-4. For `shoot`, check capture limits, take the photograph if permitted, and record
-   whether it downloaded successfully.
-5. Wait for the next scheduled observation.
+2. Start a fresh agent conversation with the instruction, timestamped preview,
+   session limits, available history, and latest capture facts.
+3. Check capacity, then call Claude. A response may contain one tool call or end
+   the observation without a photograph.
+4. Return history tool results to Claude and continue within the same run. A `shoot`
+   call uses the capture safeguards, records its actual outcome, and automatically
+   finishes the observation, with no extra inference afterward.
+5. Wait for the next scheduled observation, then start another fresh run.
 
 Everything runs sequentially: there is one inference in flight and no background
 preview sampler. Camera and API processing time do not add drift to the schedule.
@@ -160,55 +168,79 @@ catch-up bursts. Every sampled preview is retained, but the program does not sav
 every frame from the camera's live stream. Events between observations may be missed.
 
 **Watch for** defaults to **60 minutes**, measured after connection/setup.
-The **observation budget** defaults to **60 inference calls**; token-count checks are recorded
-separately and do not consume that budget. **Photo limit** defaults to **one**; increase
-it for a sequence. The first reached limit ends the session. An in-flight operation
-may take time to finish after the deadline, but cannot authorize a new shutter
-command after expiry.
+**Maximum AI calls** defaults to **360** across the session. A run can make up to
+**six** inference calls, including its initial evaluation. Reaching six without a
+completed decision displays **Run limit reached**, and monitoring continues at the
+next scheduled observation. Using the session budget ends monitoring. Token-count
+checks are recorded separately and consume neither budget. **Photo limit** defaults
+to **one** confirmed download; increase it for a sequence.
+
+The preview expires after **30 seconds**, including history lookup and API time.
+No further inference or capture starts for that preview. An in-flight request may
+finish, but cannot authorize an expired capture. The same applies to Stop and the
+session deadline. An SDK operation already in progress may take time to finish.
 
 Use **Check connection** for a local preview without an API key, inference call,
 shutter command, or changes to capture settings.
 
-## Conversation history and capacity
+## History tools and capacity
+
+| Tool | Input | Result |
+| --- | --- | --- |
+| `list_history` | Optional `start_s`, `end_s`, `cursor`, `limit` | Earlier previews, newest first: IDs, timestamps, capture facts, and `next_cursor`. Defaults to 20, maximum 50. Time filters are inclusive seconds since monitoring began. |
+| `get_history` | `frame_ids`: one to eight distinct earlier IDs | Actual images, timestamps, and factual capture outcomes. |
+| `shoot` | No arguments | Downloaded, skipped, or failed capture outcome; always finishes the observation. |
+
+History tools can access only earlier previews in the current session. They accept
+IDs, never arbitrary file paths. Invalid history requests produce a tool error the
+agent can correct within its remaining calls. There is no mandatory history lookup;
+the agent chooses when earlier images help. A successful download, its preview ID,
+and the latest capture outcome are included in subsequent runs as factual context.
 
 Every observation's preview is saved under `previews/` at its received resolution
 as a JPEG. `previews/index.jsonl` records IDs, session timestamps, SDK frame numbers,
 dimensions, and filenames. Images sent to Claude are resized to a maximum edge of
-960 pixels. All previous observations remain in each request; neither images nor
-conversation turns are summarized or silently discarded. Automatic prompt caching
-is enabled for the growing conversation. Caching does not remove context or request
-size limits, and every request still transmits the conversation.
+960 pixels. Older previews enter a fresh conversation only through `get_history`;
+the entire local archive remains available. Automatic prompt caching is enabled
+within each run. No run is summarized or silently truncated to fit capacity.
 
-Before inference, the program checks these ceilings:
+Before **every inference**, including after history retrieval, the program checks:
 
 | Resource | Maximum |
 | --- | --- |
-| Images in the accumulated conversation | 600 |
+| Images in the current request, including tool results | 600 |
 | Serialized inference request body | 30,000,000 bytes (30 MB) |
 | Input tokens reported by Anthropic's token-count endpoint | 990,000 |
 
 Image count and byte size are checked locally before either API endpoint is called.
-The token-count request includes the conversation, system instructions, output schema,
-thinking setting, and cache configuration. An invalid count or failed check stops the
-run; it does not fall back to sending an unchecked inference request. A token-count
+The token-count request includes the conversation, system instructions, tools,
+thinking setting, and cache configuration. An invalid count or failed check ends
+monitoring; it never falls back to sending an unchecked inference request. A token-count
 check and the inference each make an HTTP request, with no automatic retries.
 
-If the next observation would exceed a ceiling, the run ends with `capacity_reached`
-and reports the resource and limit. The newly saved preview and full conversation
-journal are preserved even when that observation cannot be sent for inference.
-Capacity depends on image content and session length; 990,000 tokens is an upper
-ceiling, not the expected size of each request.
+If a request would exceed a ceiling, monitoring ends with `capacity_reached` and
+reports the resource and limit. All previews, event traces, and transcripts remain
+on disk, including the observation that could not be sent. 990,000 tokens is an
+upper ceiling, not an expected request size.
 
-`conversation.jsonl` records the instruction, observations, valid model responses,
-and host-written capture outcomes. Image blocks use relative references to the local
-preview files instead of duplicating encoded image data in the journal. The final
-capture outcome is also recorded when there will be no next observation. Existing
-output directories are never overwritten. A new run starts a new conversation;
-resuming old sessions is not implemented.
+New sessions use journal format version 2:
+
+- `runs/<preview ID>/conversation.jsonl`: that run's instruction and context,
+  model responses, and tool results, including the final capture outcome.
+- `runs/<preview ID>/events.jsonl`: append-only request, tool, capture, and run
+  progress. Events have stable IDs, sequence numbers, and UTC timestamps.
+- `results.json`: session state and compact per-observation events used by the UI.
+- `captures.jsonl`: confirmed downloads with their triggering preview IDs.
+
+Image blocks use local relative file references, including images nested in tool
+results, so journals do not repeat base64 data. The state API does not send full
+conversation transcripts to the browser. Existing output folders stay untouched;
+resuming old sessions remains unsupported. Refreshing the page reconstructs the
+current session from its report while the local server remains running.
 
 ## Capture behavior
 
-A `shoot` action requests one photo of the newest observation. The application
+A `shoot` tool call requests one photo of the newest observation. The application
 rejects it when the monitoring duration has expired, the preview is older than
 **30 seconds**, or the capture cooldown is active.
 Freshness includes preview retrieval, token counting, and inference time. It is
@@ -226,7 +258,7 @@ the model's responsibility, and semantic duplicate prevention is not guaranteed.
 Recognition remains experimental. Keep framing stable and make relevant details
 large enough to distinguish in previews. Fog, exposure changes, occlusion, or several
 apartments going dark between observations can make the scene ambiguous. Synthetic
-API checks exercise the conversation protocol; they do not establish real-world
+replays exercise the agent protocol; they do not establish real-world
 smart-timelapse accuracy.
 
 The helper temporarily selects computer + memory-card storage when available,
@@ -239,9 +271,9 @@ the connection remains available. It preserves the camera's exposure and image
 format. Downloaded files can therefore be JPEG, HEIF, RAW, or a pair, according to
 the camera's recording and PC-save settings.
 
-`results.json` records each entry under `observations`, separating the model's
-`action` from `capture_status`: not requested, requested, shutter sent, downloaded,
-skipped, or failed. It also records the detected camera and capabilities, saved
+`results.json` records each entry under `observations`, including `run_status`,
+`outcome`, `model_calls`, and `capture_status`: not requested, requested, shutter
+sent, downloaded, skipped, or failed. It also records the detected camera and capabilities, saved
 preview count, inference and token-count request counts, capacity checks, and the
 session's stop reason. `captures.jsonl` records successful downloads with their
 trigger preview IDs and saved files.
@@ -272,17 +304,17 @@ Our native bridge uses Sony's SDK headers and libraries directly. It provides th
 persistent internal process protocol, USB selection, capability checks, and capture
 safeguards. Claude decisions, timing, and capture limits remain in Python.
 
-- `model.py`: fixed Anthropic transport, cached conversation payloads, action parsing, and capacity checks.
-- `history.py`: append-only preview archive, conversation journal, and capture records.
+- `model.py`: fixed Anthropic transport, native tool payloads, strict turn validation, and capacity checks.
+- `history.py`: session-scoped history tools, per-run journals, and capture records.
 - `futurelens.py`: validated session settings, monitoring, capture policy, and result recording.
 - `ui.py` / `web/`: local camera interface, session controls, and preview timeline.
 - `camera.py`: persistent SDK-process adapter used by the interface and monitoring engine.
 - `native/sony_camera.cpp`: USB connection, live view, autofocus/shutter, and downloads.
 - `native/camera_capabilities.h`: USB selection and capability-based capture policy.
 - `scripts/build_sony.py`: local macOS helper build using the downloaded SDK and `clang++`.
-- `test_model.py`: action validation, capacity boundaries, and fixed-endpoint transport checks.
+- `test_model.py`: tool-call validation, capacity boundaries, and fixed-endpoint transport checks.
 - `test_history.py`: preview and conversation persistence with local image references.
-- `test_camera.py`: conversation replay, scheduling, capacity stops, capture limits, failures, and cleanup.
+- `test_camera.py`: agent replay, call budgets, scheduling, capacity stops, capture limits, and cleanup.
 - `test_ui.py`: settings validation, exclusive camera ownership, local HTTP controls, and media access.
 - `test_native.py` / `native/test_camera_capabilities.cpp`: offline USB-selection and
   capability checks, compiled against the installed SDK headers without connecting to a camera.
@@ -291,13 +323,13 @@ safeguards. Claude decisions, timing, and capture limits remain in Python.
 .venv/bin/python -m unittest -v
 ```
 
-The sequential conversation passed a live API replay with three synthetic previews:
-`wait` for the initial scene, `shoot` for a white-to-black change, then `wait` after
-a simulated successful capture of the same scene. Token counting and automatic
-cache reuse worked in that check. No physical camera was used for this replay.
+Offline replays exercise fresh conversations, paginated history, retrieved images,
+changing and unchanged scenes, capture confirmation, budgets, Stop, timing, and
+capacity preservation. Simulated UI sessions check trace expansion, history browsing,
+image viewing, capture markers, and refresh recovery. These checks validate the
+workflow, not recognition accuracy on a physical scene.
 
 [Claude Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview),
 [token counting](https://platform.claude.com/docs/en/api/messages/count_tokens),
 [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
-[structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs),
-and [effort settings](https://platform.claude.com/docs/en/build-with-claude/effort).
+and [tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls).

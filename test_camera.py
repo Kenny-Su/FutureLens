@@ -1,4 +1,4 @@
-"""Sequential conversation replay with a fake clock/camera and mocked API transport."""
+"""Sequential agent replay with a fake clock/camera and mocked API transport."""
 
 from copy import deepcopy
 import json
@@ -13,7 +13,7 @@ from PIL import Image
 from camera import CameraError, CameraFrame, SonyCamera
 import futurelens as fl
 import model
-from test_model import answer
+from test_model import answer, tool
 
 
 class Clock:
@@ -110,8 +110,11 @@ class CameraWorkflowTests(unittest.TestCase):
     def report(self):
         return json.loads((self.output / "results.json").read_text())
 
-    def journal(self):
-        return [json.loads(line) for line in (self.output / "conversation.jsonl").read_text().splitlines()]
+    def journal(self, frame_id=0):
+        return [json.loads(line) for line in (self.output / "runs" / f"{frame_id:06d}" / "conversation.jsonl").read_text().splitlines()]
+
+    def tool_outcome(self, frame_id=0):
+        return json.loads(self.journal(frame_id)[-1]["content"][0]["content"][0]["text"])
 
     def inferences(self):
         return [payload for endpoint, payload, _ in self.requests if endpoint == model.API_ENDPOINT]
@@ -120,7 +123,7 @@ class CameraWorkflowTests(unittest.TestCase):
         settings = fl.SessionSettings(request="landscape")
         self.assertEqual((settings.interval, settings.duration, settings.max_requests,
                           settings.max_shots, settings.max_frame_age, settings.cooldown),
-                         (60, 3600, 60, 1, 30, 5))
+                         (60, 3600, 360, 1, 30, 5))
         for invalid in ({"interval": 0}, {"interval": float("nan")}, {"duration": float("inf")},
                         {"interval": True}, {"duration": 10**400}, {"max_shots": 1.5},
                         {"max_requests": False}, {"cooldown": -1}, {"max_frame_age": 0},
@@ -128,30 +131,28 @@ class CameraWorkflowTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.settings(**invalid)
 
-    def test_first_observation_is_immediate_and_chat_keeps_every_turn(self):
+    def test_first_observation_is_immediate_and_every_conversation_is_fresh(self):
         fl.run_session(self.settings(), self.output)
         self.assertEqual(self.camera.frame_times, [100, 160, 220])
         payloads = self.inferences()
-        self.assertEqual([len(p["messages"]) for p in payloads], [1, 3, 5])
-        self.assertEqual([sum(b["type"] == "image" for m in p["messages"] for b in m["content"])
-                          for p in payloads], [1, 2, 3])
-        final = payloads[-1]["messages"]
-        self.assertEqual([m["role"] for m in final], ["user", "assistant", "user", "assistant", "user"])
-        self.assertEqual(sum('"user_request"' in b.get("text", "") for m in final for b in m["content"]), 1)
-        self.assertEqual(final[:3], payloads[1]["messages"])
+        self.assertEqual([len(p["messages"]) for p in payloads], [1, 1, 1])
+        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 1, 1])
+        self.assertTrue(all('"user_request"' in p["messages"][0]["content"][0]["text"] for p in payloads))
         report = self.report()
         self.assertEqual((report["previews_saved"], report["api_requests"], report["token_count_requests"]), (3, 3, 3))
         self.assertEqual(report["status"], "completed")
         self.assertTrue(self.camera.closed)
-        self.assertEqual(len(self.journal()), 8)  # System, three exchanges, final host outcome.
-        self.assertNotIn("base64", (self.output / "conversation.jsonl").read_text())
+        for frame_id in range(3):
+            self.assertEqual(len(self.journal(frame_id)), 3)
+        self.assertNotIn("base64", (self.output / "runs/000000/conversation.jsonl").read_text())
+        self.assertFalse((self.output / "conversation.jsonl").exists())
 
     def test_changed_then_unchanged_replay_includes_successful_capture_in_chat(self):
         self.replies = iter([answer("wait"), answer("shoot"), answer("wait")])
         fl.run_session(self.settings(), self.output)
         self.assertEqual(self.camera.captures, [0])
         last = self.inferences()[-1]["messages"][-1]["content"]
-        outcome = json.loads(last[0]["text"])["capture_outcome"]
+        outcome = json.loads(last[0]["text"])["latest_capture_outcome"]
         self.assertEqual(outcome["capture_status"], "downloaded")
         self.assertEqual(outcome["frame_id"], 1)
         self.assertTrue(outcome["saved_files"])
@@ -215,9 +216,56 @@ class CameraWorkflowTests(unittest.TestCase):
         self.action, self.count_delay = "shoot", 31
         fl.run_session(self.settings(max_requests=2), self.output)
         self.assertEqual(self.camera.captures, [])
-        self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_stale_frame")
-        outcome = json.loads(self.inferences()[1]["messages"][-1]["content"][0]["text"])["capture_outcome"]
-        self.assertEqual(outcome["capture_status"], "skipped_stale_frame")
+        self.assertEqual(self.report()["observations"][0]["outcome"], "stale_preview")
+        self.assertEqual(self.inferences(), [])
+
+    def test_history_tool_rounds_retrieve_images_then_shoot_without_an_extra_call(self):
+        self.replies = iter([answer("wait"), tool("list_history", call_id="list-1"),
+                             tool("get_history", {"frame_ids": [0]}, "get-1"), answer("shoot")])
+        fl.run_session(self.settings(max_requests=10, max_shots=1), self.output)
+        payloads = self.inferences()
+        self.assertEqual([len(p["messages"]) for p in payloads], [1, 1, 3, 5])
+        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 1, 1, 2])
+        self.assertEqual(payloads[-1]["messages"][-1]["content"][0]["tool_use_id"], "get-1")
+        self.assertEqual(self.camera.captures, [0])
+        self.assertEqual(self.tool_outcome(1)["capture_status"], "downloaded")
+        self.assertEqual(self.report()["observations"][1]["model_calls"], 3)
+
+    def test_invalid_history_request_is_recoverable(self):
+        self.replies = iter([tool("get_history", {"frame_ids": [999]}, "get-1"),
+                             tool("list_history", {"type": "image"}, "list-1"), answer("wait")])
+        fl.run_session(self.settings(), self.output)
+        self.assertTrue(self.inferences()[1]["messages"][-1]["content"][0]["is_error"])
+        self.assertTrue(self.inferences()[2]["messages"][-1]["content"][0]["is_error"])
+        self.assertEqual(self.report()["observations"][0]["outcome"], "no_photo")
+        self.assertEqual(self.camera.captures, [])
+
+    def test_run_and_session_budgets_have_distinct_outcomes(self):
+        self.replies = iter(tool("list_history", call_id=f"list-{i}") for i in range(12))
+        fl.run_session(self.settings(max_requests=12), self.output)
+        entries = self.report()["observations"]
+        self.assertEqual([e["outcome"] for e in entries], ["run_limit", "session_budget"])
+        self.assertEqual([e["model_calls"] for e in entries], [6, 6])
+        self.assertEqual(self.camera.frame_times, [100, 160])
+        self.assertEqual(self.report()["token_count_requests"], 12)
+        self.assertEqual(self.report()["api_requests"], 12)
+        self.assertEqual(len(self.inferences()[6]["messages"]), 1)
+        self.assertEqual(self.report()["stop_reason"], "max_requests")
+
+    def test_duplicate_tool_ids_never_execute_a_shutter(self):
+        self.replies = iter([tool("list_history", call_id="same"), tool("shoot", call_id="same")])
+        with self.assertRaises(ValueError):
+            fl.run_session(self.settings(), self.output)
+        self.assertEqual(self.camera.captures, [])
+        self.assertEqual(self.report()["status"], "failed")
+
+    def test_history_round_that_ages_preview_starts_no_further_inference(self):
+        self.inference_delay = 31
+        self.replies = iter(tool("list_history", call_id=f"list-{i}") for i in range(3))
+        fl.run_session(self.settings(), self.output)
+        self.assertEqual([e["model_calls"] for e in self.report()["observations"]], [1, 1, 1])
+        self.assertTrue(all(e["outcome"] == "stale_preview" for e in self.report()["observations"]))
+        self.assertTrue(self.journal()[3]["content"][0]["is_error"])
 
     def test_expiry_is_rechecked_after_recording_requested_capture(self):
         self.action = "shoot"
@@ -237,7 +285,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.camera.max_delays, [25])
         self.assertEqual(len(self.inferences()), 1)
         self.assertEqual(self.report()["stop_reason"], "max_shots")
-        self.assertEqual(json.loads(self.journal()[-1]["content"][0]["text"])["capture_outcome"]["capture_status"], "downloaded")
+        self.assertEqual(self.tool_outcome()["capture_status"], "downloaded")
 
     def test_cooldown_is_enforced_between_successful_captures(self):
         self.action = "shoot"
@@ -245,15 +293,18 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.camera.captures, [0, 1])
         self.assertEqual(self.report()["observations"][1]["capture_status"], "skipped_cooldown")
 
-    def test_image_capacity_preserves_full_chat_and_next_archived_preview(self):
+    def test_retrieved_image_capacity_preserves_the_run_and_all_previews(self):
+        self.replies = iter([answer("wait"), answer("wait"), tool("get_history", {"frame_ids": [0, 1]})])
         with patch("model.MAX_IMAGES", 2):
-            fl.run_session(self.settings(), self.output)
+            fl.run_session(self.settings(max_requests=5), self.output)
         report = self.report()
         self.assertEqual(report["status"], "capacity_reached")
         self.assertEqual(report["capacity"], {"resource": "images", "used": 3, "limit": 2})
-        self.assertEqual((report["previews_saved"], report["api_requests"], report["token_count_requests"]), (3, 2, 2))
+        self.assertEqual((report["previews_saved"], report["api_requests"], report["token_count_requests"]), (3, 3, 3))
         self.assertEqual(len(list((self.output / "previews").glob("*.jpg"))), 3)
-        self.assertEqual(len([m for m in self.journal() if any(b["type"] == "image" for b in m["content"])]), 3)
+        retrieved = self.journal(2)[-1]["content"][0]["content"]
+        self.assertEqual([b["file"] for b in retrieved if b["type"] == "image"],
+                         ["previews/000000.jpg", "previews/000001.jpg"])
         self.assertTrue(self.camera.closed)
 
     def test_request_size_capacity_stops_before_either_endpoint(self):
@@ -274,7 +325,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.report()["api_requests"], 0)
         self.assertEqual(self.camera.captures, [])
 
-    def test_api_failure_stops_without_retry_or_wait_action(self):
+    def test_api_failure_stops_without_retry_or_no_photo_outcome(self):
         self.replies = iter([RuntimeError("connection failed")])
         with self.assertRaises(RuntimeError):
             fl.run_session(self.settings(), self.output)
@@ -291,7 +342,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.report()["token_count_requests"], 1)
         self.assertEqual(self.report()["status"], "failed")
 
-    def test_invalid_action_stops_before_shutter(self):
+    def test_invalid_turn_stops_before_shutter(self):
         self.action = "maybe"
         with self.assertRaises(ValueError):
             fl.run_session(self.settings(), self.output)
@@ -308,7 +359,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(capture.call_count, 1)
         self.assertEqual(self.report()["photos_taken"], 0)
         self.assertEqual(self.report()["observations"][0]["capture_status"], "failed_after_shutter")
-        self.assertEqual(json.loads(self.journal()[-1]["content"][0]["text"])["capture_outcome"]["capture_status"], "failed_after_shutter")
+        self.assertEqual(self.tool_outcome()["capture_status"], "failed_after_shutter")
         self.assertFalse((self.output / "captures.jsonl").exists())
         self.assertTrue(self.camera.closed)
 
@@ -375,7 +426,7 @@ class CameraWorkflowTests(unittest.TestCase):
             fl.run_session(self.settings(), self.output, stop_event=stop)
         self.assertEqual(self.camera.captures, [])
         self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_user_stop")
-        self.assertIn("skipped_user_stop", self.journal()[-1]["content"][0]["text"])
+        self.assertIn("skipped_user_stop", json.dumps(self.journal()[-1]))
 
     def test_ui_stop_immediately_before_shutter_prevents_capture(self):
         self.action = "shoot"
@@ -403,7 +454,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.report()["status"], "stopped")
         self.assertEqual(self.report()["photos_taken"], 1)
         self.assertEqual(self.report()["observations"][0]["capture_status"], "downloaded")
-        self.assertIn("downloaded", self.journal()[-1]["content"][0]["text"])
+        self.assertIn("downloaded", json.dumps(self.journal()[-1]))
         self.assertTrue(self.camera.closed)
 
     def test_existing_output_is_never_overwritten(self):
@@ -413,6 +464,15 @@ class CameraWorkflowTests(unittest.TestCase):
             fl.run_session(self.settings(), self.output)
         self.assertEqual((self.output / "keep.txt").read_text(), "existing user output")
         self.factory.assert_not_called()
+
+    def test_journal_initialization_failure_marks_preview_not_sent(self):
+        with patch("futurelens.AgentJournal", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            fl.run_session(self.settings(), self.output)
+        entry = self.report()["observations"][0]
+        self.assertEqual((entry["run_status"], entry["outcome"], entry["model_calls"]), ("failed", "error", 0))
+        self.assertTrue((self.output / entry["preview_file"]).is_file())
+        self.assertEqual(self.requests, [])
+        self.assertTrue(self.camera.closed)
 
     def test_archive_failure_stops_before_api_or_shutter(self):
         with patch("history.PreviewArchive.append", side_effect=OSError("disk full")), self.assertRaises(OSError):

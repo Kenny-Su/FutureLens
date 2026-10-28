@@ -7,8 +7,9 @@ Tell FutureLens what you want to see in the photograph, and let it watch the sce
 for you.
 
 FutureLens uses Claude to evaluate your Sony camera's live view against your
-instruction. Each observation adds a preview to the same conversation, keeping
-earlier views available for comparison. Every sampled preview is also saved locally.
+instruction. Each observation starts a fresh agent run. Claude can look up earlier previews,
+retrieve their images, and compare how the scene has changed. Every sampled preview
+is saved locally.
 When Claude identifies a match, your camera takes the photograph and sends the
 original file to your computer.
 
@@ -19,10 +20,11 @@ original file to your computer.
 1. **Describe the shot.** Give FutureLens a visual condition to look for.
 2. **Set the session.** Choose how often to inspect the scene, how long to watch,
    and how many photos to take.
-3. **Let the camera shoot.** Claude compares the current view with the session's
-   earlier observations and requests a photograph when it identifies a match.
-4. **Watch the story unfold.** Browse a timeline of every preview. Saved photographs
-   stand out, with access to the original files. Exploring earlier frames keeps
+3. **Let the camera shoot.** Claude inspects the current view, retrieves earlier
+   observations when useful, and requests a photograph when it identifies a match.
+4. **Watch the story unfold.** Browse a timeline of every preview, with each
+   agent run's activity beneath it. Saved photographs stand out, with access to
+   the original files. Exploring earlier frames keeps
    monitoring running.
 
 ## Moments to capture
@@ -36,8 +38,9 @@ original file to your computer.
 The fog and sunrise instructions describe a result visible in the current preview:
 the village in view or the summit lit.
 
-**Smart timelapse uses visual history.** Claude sees the session's earlier previews
-and actual capture outcomes before requesting another photograph.
+**Smart timelapse uses visual history.** Claude can retrieve the session's earlier
+images and sees factual capture outcomes when deciding whether to request another
+photograph.
 The aim is a sequence that advances as apartments go dark. This is experimental;
 recognizing every change accurately in a real building still needs field testing.
 
@@ -45,12 +48,12 @@ recognizing every change accurately in a real building still needs field testing
 
 - **Scene-specific triggers.** Combine subjects, visibility, light, and composition
   in a plain-language instruction.
-- **A continuous visual history.** Each observation stays in the conversation,
-  with a local copy of every sampled preview.
+- **Visual memory on demand.** Every preview stays in a local archive. Claude can
+  list past observations and retrieve the images it needs for each decision.
 - **Original camera files.** Download JPEG, HEIF, RAW, or paired files according
   to your camera's recording and transfer settings.
 - **Adjustable sessions.** Set inspection frequency, session duration, photo
-  limits, and the observation budget. The default is one observation
+  limits, and the maximum number of AI calls. The default is one observation
   per minute, suited to watching landscapes over time.
 - **Controlled repeat shots.** Claude receives the actual results of earlier
   capture requests. The app enforces cooldowns and photo limits.
@@ -60,7 +63,7 @@ recognizing every change accurately in a real building still needs field testing
 - **A record of every session.** Review decisions, capture outcomes, and downloaded
   files. Local preview checks help you check framing before an automated session.
 - **A quiet camera workspace.** Set your instruction and limits, then move into
-  a focused monitor with the latest preview, session progress, and a visual timeline.
+  a timeline of previews and agent activity, with compact session controls.
   A photo is highlighted only after its download succeeds.
 
 ## Sony camera support
@@ -81,10 +84,9 @@ You set exposure and image format on the camera; FutureLens handles the capture
 decision. It suits scenes that remain visible long enough for a preview to be
 evaluated and the shutter to respond.
 
-AI decisions use Anthropic's Claude API and require your API key. Each request
-includes the session's accumulated previews and conversation. Sessions stop when
-they reach their configured limits or conversation capacity; earlier observations
-are never silently removed. Preview copies and downloaded photographs are saved
+AI decisions use Anthropic's Claude API and require your API key. Each run starts
+with the current preview; historical images are sent only when retrieved. Sessions
+stop when they reach their limits or request capacity; local history is preserved. Preview copies and downloaded photographs are saved
 on your computer.
 
 **[Try FutureLens →](docs/usage.md)** — setup, camera operation, and troubleshooting.

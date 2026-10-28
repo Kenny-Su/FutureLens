@@ -4,11 +4,13 @@ const examples = {
   sunrise: "Capture the mountain when warm sunrise light is visible on its summit.",
   lights: "Take one photo of the building each time another apartment goes dark.",
 };
-const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking conversation capacity…", thinking: "Evaluating the scene…", capturing: "Taking and downloading a photo…", waiting: "Waiting for the next observation" };
-const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Observation budget reached.", capacity_reached: "Conversation capacity reached. All previews and history are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
-const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Skipped · preview too old", skipped_duration_expired: "Skipped · session expired", skipped_expired_before_shutter: "Skipped · capture expired", skipped_cooldown: "Skipped · cooldown", skipped_user_stop: "Skipped · session stopped" };
-let state, connected = false, pending = false, showingMonitor = false, selected = null, sessionId = null, initialized = false;
-let commandGeneration = 0;
+const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", waiting: "Waiting for the next observation" };
+const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
+const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
+const outcomes = { no_photo: "No photo", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
+const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot" };
+let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
+let commandGeneration = 0, following = true, viewerFrameId = null;
 const tiles = new Map();
 
 function text(id, value) { $(id).textContent = value; }
@@ -66,7 +68,9 @@ function accept(next) {
   connected = true;
   if (sessionId !== state.session_id) {
     sessionId = state.session_id;
-    selected = null;
+    following = true;
+    viewerFrameId = null;
+    $("image-viewer").close();
     tiles.clear();
     $("timeline").replaceChildren();
     showingMonitor = Boolean(sessionId);
@@ -99,84 +103,182 @@ function renderSetup() {
   show("return-session", Boolean(state.session_id));
 }
 
-function renderTimeline(entries) {
+function element(tag, className, value) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (value !== undefined) node.textContent = value;
+  return node;
+}
+function captured(entry) { return entry.capture_status === "downloaded" && entry.saved_files?.length > 0; }
+function entries() { return state.report?.observations || []; }
+function browsing() { following = false; show("go-latest", true); }
+function expand(tile, value) {
+  tile.querySelector(".run-toggle").setAttribute("aria-expanded", String(value));
+  tile.querySelector(".activity").hidden = !value;
+}
+function focusObservation(id) {
+  const tile = tiles.get(id);
+  if (!tile) return;
+  browsing();
+  for (const card of tiles.values()) card.classList.toggle("focused", card === tile);
+  expand(tile, true);
+  $("timeline").scrollLeft = tile.offsetLeft - $("timeline").offsetLeft - 4;
+  tile.querySelector(".run-toggle").focus({ preventScroll: true });
+}
+function downloads(container, entry) {
+  const key = captured(entry) ? entry.saved_files.join("|") : "";
+  if (container.dataset.key === key) return;
+  container.dataset.key = key;
+  container.replaceChildren();
+  if (captured(entry)) for (const path of entry.saved_files) {
+    const link = element("a", "", `${path.split("/").at(-1)} ↓`);
+    link.href = media(path);
+    link.download = path.split("/").at(-1);
+    container.append(link);
+  }
+}
+function openImage(id) {
+  const entry = entries().find((item) => item.frame_id === id);
+  if (!entry) return;
+  if (id !== entries().at(-1)?.frame_id) browsing();
+  viewerFrameId = id;
+  text("image-title", `Observation ${String(id + 1).padStart(2, "0")} · ${clock(entry.timestamp_s)}`);
+  loadPreview($("viewer-image"), media(entry.preview_file));
+  $("viewer-image").alt = `Observation ${id + 1} at ${clock(entry.timestamp_s)} into the session`;
+  downloads($("viewer-downloads"), entry);
+  if (!$("image-viewer").open) $("image-viewer").showModal();
+}
+function runLabel(entry) {
+  if (entry.run_status === "failed") return (entry.model_calls ? "" : "Not sent · ") + "Run failed";
+  if (entry.outcome) return (entry.model_calls ? "" : "Not sent · ") + (outcomes[entry.outcome] || "Skipped");
+  return entry.model_calls ? "Evaluating" : "Saved · preparing run";
+}
+function traceContent(row, event) {
+  row.replaceChildren();
+  row.dataset.status = event.status;
+  row.classList.toggle("success", event.capture_status === "downloaded" || event.outcome === "downloaded");
+  let label, detail = "";
+  if (event.kind === "model") {
+    label = `Evaluate · call ${event.turn}`;
+    detail = event.status === "checking" ? "Checking capacity" : event.status === "started" ? "Request in progress"
+      : event.status === "completed" ? `${event.latency_s.toFixed(1)} sec` : event.status === "failed" ? "Request failed · session ended" : outcomes[event.reason] || "Not sent";
+  } else if (event.kind === "tool") {
+    label = toolLabels[event.name] || "Tool";
+    detail = event.error ? `Tool error · ${event.error}` : event.status === "started" ? "In progress"
+      : event.status === "failed" ? "Tool failed" : event.name === "list_history" ? `${event.count} preview${event.count === 1 ? "" : "s"}${event.next_cursor !== null ? " · more available" : ""}`
+      : event.name === "get_history" ? `${event.frame_ids.length} image${event.frame_ids.length === 1 ? "" : "s"}` : event.name === "shoot" ? "" : "Finished";
+  } else if (event.kind === "capture") {
+    label = captureLabels[event.capture_status] || "Capture";
+    detail = event.capture_status === "downloaded" ? `${event.saved_files.length} original file${event.saved_files.length === 1 ? "" : "s"} downloaded`
+      : event.capture_status === "shutter_sent" ? "Shutter sent · awaiting download" : event.status === "failed" ? "No automatic retry" : "";
+  } else {
+    label = outcomes[event.outcome] || "Run finished";
+    detail = `${event.model_calls} / ${state.report?.calls_per_observation || 6} AI calls`;
+  }
+  const heading = element("div", "trace-heading");
+  const timestamp = element("time", "trace-time", `+${clock(event.elapsed_s)}`);
+  timestamp.dateTime = event.timestamp;
+  timestamp.title = new Date(event.timestamp).toLocaleTimeString();
+  heading.append(element("span", "trace-label", label), timestamp);
+  row.append(heading);
+  if (detail) row.append(element("p", "trace-detail", detail));
+  if (event.kind === "tool" && event.frame_ids) {
+    const thumbnails = element("div", "history-images");
+    for (const id of event.frame_ids) {
+      const source = entries().find((entry) => entry.frame_id === id);
+      if (!source) continue;
+      const item = element("div", "history-image");
+      const button = element("button");
+      button.type = "button";
+      button.setAttribute("aria-label", `Enlarge retrieved observation ${id + 1}`);
+      const image = element("img");
+      image.alt = `Retrieved observation ${id + 1}`;
+      image.loading = "lazy";
+      loadPreview(image, media(source.preview_file));
+      button.append(image);
+      button.addEventListener("click", () => openImage(id));
+      const link = element("button", "history-link", `#${String(id + 1).padStart(2, "0")} · ${clock(source.timestamp_s)} ↗`);
+      link.type = "button";
+      link.setAttribute("aria-label", `Go to observation ${id + 1}`);
+      link.addEventListener("click", () => focusObservation(id));
+      item.append(button, link);
+      thumbnails.append(item);
+    }
+    row.append(thumbnails);
+  }
+}
+function renderTrace(tile, events) {
+  // Collapse progress updates for one action into a stable row; the full events stay on disk.
+  const grouped = new Map();
+  for (const event of events) {
+    if (event.kind === "run" && (event.status === "started" || event.outcome === "downloaded")) continue;
+    grouped.set(event.action_id, { ...grouped.get(event.action_id), ...event });
+  }
+  const trace = tile.querySelector(".activity");
+  for (const [id, event] of grouped) {
+    let row = tile.traceRows.get(id);
+    if (!row) {
+      row = element("div", "trace-row");
+      tile.traceRows.set(id, row);
+      trace.append(row);
+    }
+    if (row.dataset.event !== event.id) {
+      traceContent(row, event);
+      row.dataset.event = event.id;
+    }
+  }
+}
+function renderTimeline(observations) {
   let added = false;
-  for (const entry of entries) {
+  for (const entry of observations) {
     let tile = tiles.get(entry.frame_id);
     if (!tile) {
-      tile = document.createElement("button");
-      tile.type = "button";
-      tile.className = "timeline-item";
-      const thumb = document.createElement("span");
-      thumb.className = "thumb";
-      const img = document.createElement("img");
-      img.loading = "lazy";
-      img.alt = "";
-      loadPreview(img, media(entry.preview_file));
-      const mark = document.createElement("span");
-      mark.className = "thumb-mark";
-      mark.textContent = "✓";
-      thumb.append(img, mark);
-      const meta = document.createElement("span");
-      meta.className = "thumb-meta";
-      const timestamp = document.createElement("span");
-      timestamp.textContent = clock(entry.timestamp_s);
-      const result = document.createElement("span");
-      result.className = "thumb-result";
-      meta.append(timestamp, result);
-      tile.append(thumb, meta);
-      tile.addEventListener("click", () => { selected = entry.frame_id; render(); });
+      tile = element("article", "observation");
+      tile.id = `observation-${entry.frame_id}`;
+      tile.traceRows = new Map();
+      const heading = element("div", "card-heading");
+      heading.append(element("h3", "", `Preview ${String(entry.frame_id + 1).padStart(2, "0")}`), element("time", "", clock(entry.timestamp_s)));
+      const button = element("button", "preview-button");
+      button.type = "button";
+      button.setAttribute("aria-label", `Enlarge observation ${entry.frame_id + 1}`);
+      const image = element("img");
+      image.alt = `Preview ${entry.frame_id + 1}`;
+      image.loading = "lazy";
+      loadPreview(image, media(entry.preview_file));
+      button.append(image, element("span", "saved-marker", "✓ Photo saved"));
+      button.addEventListener("click", () => openImage(entry.frame_id));
+      const toggle = element("button", "run-toggle");
+      toggle.type = "button";
+      toggle.setAttribute("aria-controls", `trace-${entry.frame_id}`);
+      toggle.append(element("span", "run-dot"), element("span", "run-label"), element("span", "run-calls"), element("span", "chevron", "⌄"));
+      toggle.addEventListener("click", () => {
+        if (entry.frame_id !== entries().at(-1)?.frame_id) browsing();
+        expand(tile, toggle.getAttribute("aria-expanded") !== "true");
+      });
+      const trace = element("div", "activity");
+      trace.id = `trace-${entry.frame_id}`;
+      trace.setAttribute("aria-label", `Agent activity for observation ${entry.frame_id + 1}`);
+      tile.append(heading, button, toggle, element("div", "download-links"), trace);
+      expand(tile, entry.frame_id === observations.at(-1)?.frame_id);
       $("timeline").append(tile);
       tiles.set(entry.frame_id, tile);
       added = true;
     }
-    const captured = entry.capture_status === "downloaded" && entry.saved_files?.length > 0;
-    const active = entry.frame_id === (selected ?? entries.at(-1)?.frame_id);
-    tile.classList.toggle("captured", captured);
-    tile.setAttribute("aria-pressed", String(active));
-    tile.setAttribute("aria-label", `Observation ${entry.frame_id + 1}, ${clock(entry.timestamp_s)}${captured ? ", photo saved" : ""}`);
-    tile.querySelector(".thumb-result").textContent = captured ? "Photo" : entry.action === "wait" ? "Wait" : "Preview";
+    tile.classList.toggle("captured", captured(entry));
+    tile.dataset.status = entry.run_status || "saved";
+    tile.querySelector(".saved-marker").hidden = !captured(entry);
+    tile.querySelector(".run-label").textContent = runLabel(entry);
+    tile.querySelector(".run-calls").textContent = `${entry.model_calls || 0} / ${state.report?.calls_per_observation || 6}`;
+    downloads(tile.querySelector(".download-links"), entry);
+    renderTrace(tile, entry.events || []);
   }
-  if (added && selected === null) $("timeline").scrollLeft = $("timeline").scrollWidth;
-  show("timeline-empty", !entries.length);
-  text("timeline-count", entries.length ? `${entries.length} observation${entries.length === 1 ? "" : "s"}` : "Every observation, in order");
-}
-
-function renderViewer(entries, active) {
-  const entry = entries.find((item) => item.frame_id === selected) || entries.at(-1);
-  text("view-label", selected === null ? "Latest observation" : "Viewing history · monitoring continues");
-  if (!active && selected !== null) text("view-label", "Viewing session history");
-  show("go-latest", selected !== null);
-  show("main-preview", Boolean(entry));
-  show("viewer-empty", !entry);
-  const captured = entry?.capture_status === "downloaded" && entry.saved_files?.length > 0;
-  show("photo-badge", captured);
-  show("originals", captured);
-  if (!entry) {
-    text("empty-title", active ? "Connecting to your camera" : "No preview received");
-    text("empty-detail", active ? "The first observation will appear here." : "Review the session status, then start a new session.");
-    text("preview-number", "Awaiting first preview");
-    text("preview-time", "");
-    text("preview-action", "");
-    return;
-  }
-  const url = media(entry.preview_file);
-  loadPreview($("main-preview"), url);
-  $("main-preview").alt = `Camera observation ${entry.frame_id + 1} at ${clock(entry.timestamp_s)} into the session`;
-  text("preview-number", `Observation ${String(entry.frame_id + 1).padStart(2, "0")}`);
-  text("preview-time", clock(entry.timestamp_s));
-  text("preview-action", captureLabels[entry.capture_status] || (entry.action === "wait" ? "No photo requested" : active ? "Evaluating…" : "Preview saved"));
-  const key = `${sessionId}:${entry.frame_id}:${captured ? entry.saved_files.join("|") : ""}`;
-  if ($("original-links").dataset.key !== key) {
-    $("original-links").dataset.key = key;
-    $("original-links").replaceChildren();
-    if (captured) for (const path of entry.saved_files) {
-      const link = document.createElement("a");
-      link.href = media(path);
-      link.download = path.split("/").at(-1);
-      link.textContent = `${link.download} ↓`;
-      $("original-links").append(link);
-    }
+  if (added && following) $("timeline").scrollLeft = $("timeline").scrollWidth;
+  show("go-latest", !following);
+  show("timeline-empty", !observations.length);
+  text("timeline-count", `${observations.length} preview${observations.length === 1 ? "" : "s"} · activity beneath each frame`);
+  if ($("image-viewer").open) {
+    const entry = observations.find((item) => item.frame_id === viewerFrameId);
+    if (entry) downloads($("viewer-downloads"), entry);
   }
 }
 
@@ -186,7 +288,7 @@ function renderMonitor() {
   const active = state.operation === "monitor";
   const failed = report.status === "failed" || Boolean(state.error);
   const stopping = state.stopping;
-  text("monitor-title", active ? "Monitoring" : failed ? "Session ended" : "Session complete");
+  text("monitor-title", active ? "Monitoring" : failed ? "Session ended" : report.status === "stopped" ? "Session stopped" : "Session complete");
   text("status-text", !connected ? "Reconnecting" : stopping ? "Stopping safely" : failed ? "Needs attention" : active ? (report.phase === "connecting" || !report.phase ? "Connecting" : "Monitoring") : report.status === "stopped" ? "Stopped" : "Finished");
   $("session-status").className = `status-pill ${failed ? "error" : active ? "busy" : ""}`;
   show("stop", active);
@@ -194,17 +296,16 @@ function renderMonitor() {
   show("new-session", !active);
   text("active-instruction", report.request || $("instruction").value);
   text("active-interval", `${report.settings?.interval ?? $("interval").value} sec`);
-  text("active-max-shots", report.settings?.max_shots ?? $("max-shots").value);
   text("active-camera", report.camera_model || (active ? "Connecting…" : "Not connected"));
   text("preview-count", entries.length);
-  text("shot-count", report.photos_taken || 0);
+  text("shot-count", `${report.photos_taken || 0} / ${report.settings?.max_shots ?? $("max-shots").value}`);
+  text("call-count", `${report.api_requests || 0} / ${report.settings?.max_requests ?? $("max-requests").value}`);
   text("session-detail", failed ? state.error || report.camera_error || `Session stopped (${report.error_type || "error"}). Check the saved logs.`
     : stopping ? "Waiting for an active operation to finish. A capture already sent to the camera may still complete."
-    : active ? "Your instruction and visual history stay together throughout this session."
+    : active ? ""
     : reasons[report.stop_reason] || "This session has ended. Your files are saved locally.");
   text("output-path", !active && state.output ? `Saved in ${state.output}` : "");
   renderTimeline(entries);
-  renderViewer(entries, active);
   updateClock();
 }
 
@@ -239,13 +340,31 @@ $("session-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
   for (const key of ["interval", "duration_minutes", "max_shots", "max_requests"]) data[key] = Number(data[key]);
-  if (await command("/api/start", data)) { showingMonitor = true; selected = null; render(); window.scrollTo(0, 0); }
+  if (await command("/api/start", data)) { showingMonitor = true; following = true; render(); window.scrollTo(0, 0); }
 });
 $("check-camera").addEventListener("click", () => command("/api/check"));
 $("stop").addEventListener("click", () => command("/api/stop"));
 $("new-session").addEventListener("click", () => { showingMonitor = false; notice(""); render(); window.scrollTo(0, 0); });
 $("return-session").addEventListener("click", () => { showingMonitor = true; render(); });
-$("go-latest").addEventListener("click", () => { selected = null; render(); $("timeline").scrollLeft = $("timeline").scrollWidth; });
+$("go-latest").addEventListener("click", () => {
+  following = true;
+  for (const tile of tiles.values()) tile.classList.remove("focused");
+  const latest = tiles.get(entries().at(-1)?.frame_id);
+  if (latest) expand(latest, true);
+  $("timeline").scrollLeft = $("timeline").scrollWidth;
+  show("go-latest", false);
+});
+$("timeline").addEventListener("scroll", () => {
+  const timeline = $("timeline");
+  if (following && timeline.scrollWidth - timeline.clientWidth - timeline.scrollLeft > 12) browsing();
+}, { passive: true });
+$("close-viewer").addEventListener("click", () => $("image-viewer").close());
+$("image-viewer").addEventListener("click", (event) => {
+  if (event.target === $("image-viewer")) {
+    const rect = event.target.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) event.target.close();
+  }
+});
 for (const button of document.querySelectorAll("[data-example]")) button.addEventListener("click", () => {
   $("instruction").value = examples[button.dataset.example];
   $("instruction").focus();

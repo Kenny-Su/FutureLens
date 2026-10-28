@@ -31,7 +31,7 @@ class InterfaceTests(unittest.TestCase):
 
     def test_settings_validate_before_camera_or_api_work(self):
         settings = session_settings({"request": "scene"})
-        self.assertEqual((settings.interval, settings.duration, settings.max_shots, settings.max_requests), (60, 3600, 1, 60))
+        self.assertEqual((settings.interval, settings.duration, settings.max_shots, settings.max_requests), (60, 3600, 1, 360))
         for settings in ({"request": ""}, {"request": 1}, {"request": "x", "interval": -1},
                          {"request": "x", "interval": True}, {"request": "x", "duration_minutes": float("nan")},
                          {"request": "x", "duration_minutes": True},
@@ -67,6 +67,10 @@ class InterfaceTests(unittest.TestCase):
                          ("completed", "max_shots", 1))
         entry = report["observations"][0]
         self.assertEqual(entry["capture_status"], "downloaded")
+        self.assertEqual((entry["run_status"], entry["model_calls"]), ("finished", 1))
+        self.assertEqual(entry["events"][-1]["outcome"], "downloaded")
+        self.assertTrue((self.manager.output / entry["conversation_file"]).is_file())
+        self.assertNotIn('"base64"', json.dumps(state))
         self.assertTrue(self.manager.media_file(state["session_id"], entry["saved_files"][0]).is_file())
         inference.assert_called_once()
 

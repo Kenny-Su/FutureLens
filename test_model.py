@@ -1,4 +1,4 @@
-"""Offline checks for action responses, capacity preflight, and API transport."""
+"""Offline checks for native tool turns, capacity preflight, and API transport."""
 
 import base64
 import io
@@ -14,8 +14,15 @@ from PIL import Image
 import model
 
 
+def tool(name, arguments=None, call_id="call-1"):
+    return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": call_id,
+            "name": name, "input": arguments or {}}]}
+
+
 def answer(action):
-    return {"model": model.MODEL, "stop_reason": "end_turn", "content": [model.text_content({"action": action})]}
+    if action == "wait":
+        return {"model": model.MODEL, "stop_reason": "end_turn", "content": []}
+    return tool(action)
 
 
 class ModelTests(unittest.TestCase):
@@ -30,39 +37,37 @@ class ModelTests(unittest.TestCase):
         messages = [{"role": "user", "content": [model.image_content(image)]}]
         payload = model.make_payload(messages)
         self.assertEqual(payload["model"], "claude-haiku-5-5")
-        self.assertNotIn("tools", payload)
-        self.assertNotIn("tool_choice", payload)
+        self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot"])
+        self.assertEqual(payload["tool_choice"], {"type": "auto", "disable_parallel_tool_use": True})
         self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
         encoded = base64.b64decode(payload["messages"][0]["content"][0]["source"]["data"])
         with Image.open(io.BytesIO(encoded)) as sent:
             self.assertEqual(sent.size, (960, 540))
         self.assertEqual(image.size, (1920, 1080))
-        schema = payload["output_config"]["format"]["schema"]
-        self.assertEqual(schema["properties"], {"action": {"type": "string", "enum": ["shoot", "wait"]}})
-        self.assertEqual(schema["required"], ["action"])
-        self.assertFalse(schema["additionalProperties"])
+        self.assertNotIn("format", payload["output_config"])
         self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertEqual(payload["output_config"]["effort"], "low")
         messages.append({"role": "assistant", "content": answer("wait")["content"]})
         self.assertEqual(len(payload["messages"]), 1)
 
-    def test_only_one_valid_action_is_accepted(self):
-        for value in ("shoot", "wait"):
-            self.assertEqual(model.parse_action(answer(value)), value)
-        invalid = [{}, None, answer("other"), answer(True), answer(0), answer(None), answer([]),
+    def test_only_one_valid_tool_or_end_turn_is_accepted(self):
+        self.assertIsNone(model.parse_turn(answer("wait"), set()))
+        self.assertEqual(model.parse_turn(answer("shoot"), set())["name"], "shoot")
+        invalid = [{}, None, answer("unknown"),
                    {**answer("shoot"), "stop_reason": "refusal"},
                    {**answer("shoot"), "stop_reason": "max_tokens"},
-                   {**answer("shoot"), "stop_reason": "tool_use"},
+                   {**answer("shoot"), "stop_reason": "end_turn"},
                    {**answer("shoot"), "content": [None]},
                    {**answer("shoot"), "content": []},
-                   {**answer("shoot"), "content": answer("shoot")["content"] * 2}]
-        for text in ('{"action":"shoot","reason":"extra"}', 'not JSON',
-                     '{"action":"wait","action":"shoot"}', '[["action","shoot"]]',
-                     '[{"action":"shoot"}]', '"shoot"'):
-            invalid.append({**answer("shoot"), "content": [{"type": "text", "text": text}]})
+                   {**answer("shoot"), "content": answer("shoot")["content"] * 2},
+                   tool("shoot", {"extra": 1}), tool("get_history", {"frame_ids": float("nan")})]
         for response in invalid:
             with self.subTest(response=response), self.assertRaises(ValueError):
-                model.parse_action(response)
+                model.parse_turn(response, set())
+        seen = set()
+        model.parse_turn(tool("list_history"), seen)
+        with self.assertRaises(ValueError):
+            model.parse_turn(tool("shoot"), seen)
 
     def test_image_and_exact_encoded_byte_capacity(self):
         payload = model.make_payload([{"role": "user", "content": [model.image_content(Image.new("RGB", (8, 8)))]}])
@@ -73,13 +78,13 @@ class ModelTests(unittest.TestCase):
             model.check_capacity(payload)
         self.assertEqual(failure.exception.details, {"resource": "request_bytes", "used": size, "limit": size - 1})
         image = payload["messages"][0]["content"][0]
-        payload["messages"][0]["content"] = [image] * 600
+        payload["messages"][0]["content"] = [{"type": "tool_result", "tool_use_id": "images", "content": [image] * 600}]
         self.assertEqual(model.check_capacity(payload)["images"], 600)
-        payload["messages"][0]["content"].append(image)
+        payload["messages"][0]["content"][0]["content"].append(image)
         with self.assertRaises(model.CapacityReached) as failure:
             model.check_capacity(payload)
         self.assertEqual(failure.exception.details["resource"], "images")
-        self.assertEqual(len(payload["messages"][0]["content"]), 601)
+        self.assertEqual(len(payload["messages"][0]["content"][0]["content"]), 601)
 
     def test_token_count_checks_the_same_prompt_format_and_cache_settings(self):
         payload = model.make_payload([{"role": "user", "content": [model.text_content("sunrise")]}])
@@ -116,7 +121,7 @@ class ModelTests(unittest.TestCase):
         with patch("model.request.build_opener") as opener:
             opener.return_value.open.return_value = io.BytesIO(json.dumps(answer("wait")).encode())
             response = model.call_model(payload, config, timeout=2.5)
-            self.assertEqual(model.parse_action(response), "wait")
+            self.assertIsNone(model.parse_turn(response, set()))
             self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 2.5)
         sent = opener.return_value.open.call_args.args[0]
         self.assertEqual(sent.full_url, "https://api.anthropic.com/v1/messages")

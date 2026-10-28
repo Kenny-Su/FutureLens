@@ -44,7 +44,7 @@
               <label>Watch for<div class="number-field"><input name="duration_minutes" id="duration" type="number" value="60" min="1" step="1" required><span>min</span></div></label>
               <label>Photo limit<div class="number-field"><input name="max_shots" id="max-shots" type="number" value="1" min="1" step="1" required><span>photos</span></div></label>
             </div>
-            <details class="advanced"><summary>Observation budget</summary><div><label for="max-requests">Maximum AI checks</label><input name="max_requests" id="max-requests" type="number" value="60" min="1" step="1" required><p class="muted small">The session ends when any limit is reached.</p></div></details>
+            <details class="advanced"><summary>AI budget</summary><div><label for="max-requests">Maximum AI calls</label><input name="max_requests" id="max-requests" type="number" value="360" min="1" step="1" required><p class="muted small">Up to six calls per observation. The session ends when this budget is used.</p></div></details>
           </div>
           <div class="form-footer"><p class="muted small">Every preview saved.<br>Every captured moment marked.</p><button class="button primary" id="start" type="submit">Start monitoring <span>↗</span></button></div>
           <p class="privacy-note">Sampled previews are sent to Claude for evaluation. Originals stay on your computer. Recognition is experimental.</p>
@@ -70,37 +70,31 @@
         <div><p class="eyebrow">Your scene, unfolding</p><h1 id="monitor-title">Monitoring</h1></div>
         <div class="monitor-actions"><span id="session-status" class="status-pill"><span class="dot"></span><span id="status-text">Connecting</span></span><button id="stop" class="button secondary" type="button"><span class="stop-square"></span> Stop session</button><button id="new-session" class="button primary" type="button" hidden>New session <span>↗</span></button></div>
       </div>
-      <div class="monitor-grid">
-        <div class="viewer-card">
-          <div class="viewer-toolbar"><span id="view-label" class="eyebrow">Latest observation</span><button id="go-latest" class="text-button" type="button" hidden>Return to latest →</button></div>
-          <div class="viewer">
-            <img id="main-preview" alt="Selected camera observation" hidden>
-            <div id="viewer-empty" class="viewer-empty"><span class="viewfinder"></span><h2 id="empty-title">Connecting to your camera</h2><p id="empty-detail">The first observation will appear here.</p></div>
-            <span id="photo-badge" class="photo-badge" hidden><span>✓</span> Photo saved</span>
-          </div>
-          <div class="viewer-caption"><div><span id="preview-number">Awaiting first preview</span><span id="preview-time" class="muted mono"></span></div><span id="preview-action" class="muted small"></span></div>
-          <div id="originals" class="originals" hidden><span>Original photograph</span><div id="original-links"></div></div>
+      <div class="session-summary">
+        <div class="instruction-summary"><span class="eyebrow">Watching for</span><p id="active-instruction"></p><span id="active-camera" class="muted small"></span></div>
+        <div class="session-metrics">
+          <div class="metric"><span>Observations</span><strong id="preview-count">0</strong></div>
+          <div class="metric"><span>Photos saved</span><strong id="shot-count">0 / 1</strong></div>
+          <div class="metric"><span>AI calls</span><strong id="call-count">0 / 360</strong></div>
+          <div class="metric"><span>Observe every</span><strong id="active-interval">60 sec</strong></div>
         </div>
-
-        <aside class="session-card">
-          <div class="section-heading"><h2>Watching for</h2><span class="tag">Claude</span></div>
-          <p id="active-instruction" class="active-instruction"></p>
-          <div class="session-progress"><div><span class="muted small">Session time</span><span id="elapsed" class="mono">00:00 / 60:00</span></div><progress id="duration-progress" value="0" max="100" aria-label="Session duration"></progress></div>
-          <dl class="session-settings"><div><dt>Observe every</dt><dd id="active-interval">60 sec</dd></div><div><dt>Photo limit</dt><dd id="active-max-shots">1</dd></div><div><dt>Camera</dt><dd id="active-camera">Connecting…</dd></div></dl>
-          <div class="session-counts"><div><strong id="preview-count">0</strong><span>Previews</span></div><div><strong id="shot-count">0</strong><span>Photos saved</span></div></div>
-          <div class="next-check"><span class="dot"></span><span id="next-check">Connecting to camera…</span></div>
-          <p id="session-detail" class="muted small">Your instruction and visual history stay together throughout this session.</p>
-          <p id="output-path" class="output-path"></p>
-        </aside>
+        <div class="session-progress"><div><span id="next-check">Connecting to camera…</span><span id="elapsed" class="mono">00:00 / 60:00</span></div><progress id="duration-progress" value="0" max="100" aria-label="Session duration"></progress></div>
+        <p id="session-detail" class="muted small"></p>
+        <p id="output-path" class="output-path"></p>
       </div>
       <section class="timeline-section" aria-labelledby="timeline-title">
-        <div class="timeline-header"><div><h2 id="timeline-title">Scene timeline</h2><span id="timeline-count" class="muted small">Every observation, in order</span></div><div class="legend"><span><i></i> Preview</span><span><i class="captured-key"></i> Photo saved</span></div></div>
-        <div id="timeline" class="timeline" aria-label="Preview timeline"></div>
-        <div id="timeline-empty" class="timeline-empty">A visual history will build here, one observation at a time.</div>
+        <div class="timeline-header"><div><h2 id="timeline-title">Scene timeline</h2><span id="timeline-count" class="muted small">Every observation, in order</span></div><button id="go-latest" class="text-button" type="button" hidden>Return to latest →</button></div>
+        <div id="timeline" class="timeline" tabindex="0" aria-label="Preview timeline. Scroll horizontally to browse observations."></div>
+        <div id="timeline-empty" class="timeline-empty">The first preview will appear here after the camera connects.</div>
       </section>
-      <p class="monitor-footnote">Previews update at your observation interval. Select a frame to explore; monitoring continues.</p>
+      <p class="monitor-footnote">Each preview starts a fresh agent run. Open a card to follow its activity; monitoring continues while you browse.</p>
     </section>
   </main>
+  <dialog id="image-viewer" aria-labelledby="image-title">
+    <div class="image-toolbar"><h2 id="image-title">Observation</h2><button id="close-viewer" class="button secondary" type="button" autofocus>Close ×</button></div>
+    <img id="viewer-image" alt="">
+    <div id="viewer-downloads" class="download-links"></div>
+  </dialog>
   <footer class="page-footer"><span>FutureLens</span><span>Made for moments that take their time.</span><span>Sony Camera Remote SDK</span></footer>
 </body>
 </html>
