@@ -31,10 +31,12 @@ class InterfaceTests(unittest.TestCase):
 
     def test_settings_validate_before_camera_or_api_work(self):
         settings = session_settings({"request": "scene"})
+        self.assertEqual(settings.preview_mode, "auto")
+        self.assertEqual(session_settings({"request": "scene", "preview_mode": "fixed", "interval": 45}).interval, 45)
         self.assertEqual((settings.interval, settings.duration, settings.max_shots, settings.max_requests), (60, 3600, 1, 360))
         for settings in ({"request": ""}, {"request": 1}, {"request": "x", "interval": -1},
                          {"request": "x", "interval": True}, {"request": "x", "duration_minutes": float("nan")},
-                         {"request": "x", "duration_minutes": True},
+                         {"request": "x", "duration_minutes": True}, {"request": "x", "preview_mode": "other"},
                          {"request": "x", "duration_minutes": "10"},
                          {"request": "x", "duration_minutes": 10**400},
                          {"request": "x", "max_shots": 1.5}, {"request": "x", "output": "/tmp/x"},
@@ -56,12 +58,13 @@ class InterfaceTests(unittest.TestCase):
                 patch("waitless.call_model", return_value=answer("shoot")) as inference, \
                 patch("waitless.time.monotonic", side_effect=clock.monotonic):
             self.manager.start({"request": "Capture this scene", "duration_minutes": 2,
-                                "interval": 45, "max_shots": 1, "max_requests": 3})
+                                "preview_mode": "fixed", "interval": 45, "max_shots": 1, "max_requests": 3})
             self.manager.worker.join(2)
             self.assertFalse(self.manager.worker.is_alive())
         state = self.manager.state()
         self.assertIsNone(state["error"])
         report = state["report"]
+        self.assertEqual(report["settings"]["preview_mode"], "fixed")
         self.assertEqual((report["settings"]["duration"], report["settings"]["interval"]), (120, 45))
         self.assertEqual((report["status"], report["stop_reason"], report["photos_taken"]),
                          ("completed", "max_shots", 1))

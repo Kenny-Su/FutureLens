@@ -37,7 +37,7 @@ class ModelTests(unittest.TestCase):
         messages = [{"role": "user", "content": [model.image_content(image)]}]
         payload = model.make_payload(messages)
         self.assertEqual(payload["model"], "claude-haiku-5-5")
-        self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot"])
+        self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot", "set_preview_interval"])
         self.assertEqual(payload["tool_choice"], {"type": "auto", "disable_parallel_tool_use": True})
         self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
         encoded = base64.b64decode(payload["messages"][0]["content"][0]["source"]["data"])
@@ -49,6 +49,14 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(payload["output_config"]["effort"], "low")
         messages.append({"role": "assistant", "content": answer("wait")["content"]})
         self.assertEqual(len(payload["messages"]), 1)
+
+    def test_fixed_mode_does_not_offer_or_accept_scheduling(self):
+        payload = model.make_payload([], preview_mode="fixed")
+        self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot"])
+        response = tool("set_preview_interval", {"seconds": 10})
+        self.assertEqual(model.parse_turn(response, set())["name"], "set_preview_interval")
+        with self.assertRaises(ValueError):
+            model.parse_turn(response, set(), preview_mode="fixed")
 
     def test_only_one_valid_tool_or_end_turn_is_accepted(self):
         self.assertIsNone(model.parse_turn(answer("wait"), set()))

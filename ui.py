@@ -20,7 +20,7 @@ STATIC = ROOT / "web"
 
 
 def session_settings(data):
-    if not isinstance(data, dict) or set(data) - {"request", "interval", "duration_minutes", "max_shots", "max_requests"}:
+    if not isinstance(data, dict) or set(data) - {"request", "interval", "preview_mode", "duration_minutes", "max_shots", "max_requests"}:
         raise ValueError("Invalid session settings.")
     values = dict(data)
     minutes = values.pop("duration_minutes", 60)

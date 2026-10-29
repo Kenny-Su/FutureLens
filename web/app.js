@@ -5,11 +5,11 @@ const examples = {
   sunrise: "Capture the mountain when warm sunrise light is visible on its summit.",
   lights: "Take one photo of the building each time another apartment goes dark.",
 };
-const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", waiting: "Waiting for the next observation" };
+const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", scheduling: "Updating preview interval…", waiting: "Waiting for the next observation" };
 const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
 const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
-const outcomes = { no_photo: "No photo", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
-const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot" };
+const outcomes = { no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
+const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot", set_preview_interval: "Change preview interval" };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
 const tiles = new Map();
@@ -167,7 +167,8 @@ function traceContent(row, event) {
     label = toolLabels[event.name] || "Tool";
     detail = event.error ? `Tool error · ${event.error}` : event.status === "started" ? "In progress"
       : event.status === "failed" ? "Tool failed" : event.name === "list_history" ? `${event.count} preview${event.count === 1 ? "" : "s"}${event.next_cursor !== null ? " · more available" : ""}`
-      : event.name === "get_history" ? `${event.frame_ids.length} image${event.frame_ids.length === 1 ? "" : "s"}` : event.name === "shoot" ? "" : "Finished";
+      : event.name === "get_history" ? `${event.frame_ids.length} image${event.frame_ids.length === 1 ? "" : "s"}`
+      : event.name === "set_preview_interval" ? `${event.previous_seconds} → ${event.seconds} sec` : event.name === "shoot" ? "" : "Finished";
   } else if (event.kind === "capture") {
     label = captureLabels[event.capture_status] || "Capture";
     detail = event.capture_status === "downloaded" ? `${event.saved_files.length} original file${event.saved_files.length === 1 ? "" : "s"} downloaded`
@@ -296,7 +297,9 @@ function renderMonitor() {
   $("stop").disabled = stopping || pending || !connected;
   show("new-session", !active);
   text("active-instruction", report.request || $("instruction").value);
-  text("active-interval", `${report.settings?.interval ?? $("interval").value} sec`);
+  const auto = (report.settings?.preview_mode ?? $("preview-mode").value) === "auto";
+  text("interval-label", auto ? "Auto interval" : "Fixed interval");
+  text("active-interval", `${report.current_interval_s ?? report.settings?.interval ?? (auto ? 60 : Number($("interval").value))} sec`);
   text("active-camera", report.camera_model || (active ? "Connecting…" : "Not connected"));
   text("preview-count", entries.length);
   text("shot-count", `${report.photos_taken || 0} / ${report.settings?.max_shots ?? $("max-shots").value}`);
@@ -337,10 +340,22 @@ function render() {
   if (showingMonitor) renderMonitor();
 }
 
+function updatePreviewMode() {
+  const auto = $("preview-mode").value === "auto";
+  show("fixed-interval", !auto);
+  $("interval").disabled = auto;
+  $("timing-settings").classList.toggle("auto-timing", auto);
+  text("mode-note", auto
+    ? "Checks less often when the scene is quiet, more often as your moment approaches. Between 10 seconds and 5 minutes."
+    : "Checks at your chosen interval throughout the session.");
+}
+$("preview-mode").addEventListener("change", updatePreviewMode);
+updatePreviewMode();
+
 $("session-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
-  for (const key of ["interval", "duration_minutes", "max_shots", "max_requests"]) data[key] = Number(data[key]);
+  for (const key of ["interval", "duration_minutes", "max_shots", "max_requests"]) if (key in data) data[key] = Number(data[key]);
   if (await command("/api/start", data)) { showingMonitor = true; following = true; render(); window.scrollTo(0, 0); }
 });
 $("check-camera").addEventListener("click", () => command("/api/check"));

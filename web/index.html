@@ -41,8 +41,10 @@
           </div>
           <div class="settings-block">
             <div class="section-heading"><span class="step">02</span><h2>The session</h2></div>
-            <div class="settings-grid">
-              <label>Observe every<div class="number-field"><input name="interval" id="interval" type="number" value="60" min="1" step="1" required><span>sec</span></div></label>
+            <div class="mode-control"><label for="preview-mode">Preview timing</label><select name="preview_mode" id="preview-mode" aria-describedby="mode-note"><option value="auto" selected>Auto</option><option value="fixed">Fixed</option></select></div>
+            <p id="mode-note" class="muted small">Checks less often when the scene is quiet, more often as your moment approaches. Between 10 seconds and 5 minutes.</p>
+            <div id="timing-settings" class="settings-grid auto-timing">
+              <label id="fixed-interval" hidden>Observe every<div class="number-field"><input name="interval" id="interval" type="number" value="60" min="1" step="1" required disabled><span>sec</span></div></label>
               <label>Watch for<div class="number-field"><input name="duration_minutes" id="duration" type="number" value="60" min="1" step="1" required><span>min</span></div></label>
               <label>Photo limit<div class="number-field"><input name="max_shots" id="max-shots" type="number" value="1" min="1" step="1" required><span>photos</span></div></label>
             </div>
@@ -78,7 +80,7 @@
           <div class="metric"><span>Observations</span><strong id="preview-count">0</strong></div>
           <div class="metric"><span>Photos saved</span><strong id="shot-count">0 / 1</strong></div>
           <div class="metric"><span>AI calls</span><strong id="call-count">0 / 360</strong></div>
-          <div class="metric"><span>Observe every</span><strong id="active-interval">60 sec</strong></div>
+          <div class="metric"><span id="interval-label">Auto interval</span><strong id="active-interval">60 sec</strong></div>
         </div>
         <div class="session-progress"><div><span id="next-check">Connecting to camera…</span><span id="elapsed" class="mono">00:00 / 60:00</span></div><progress id="duration-progress" value="0" max="100" aria-label="Session duration"></progress></div>
         <p id="session-detail" class="muted small"></p>

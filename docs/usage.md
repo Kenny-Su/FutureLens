@@ -11,8 +11,9 @@ Anthropic is the only supported API provider. WaitLess uses its Messages API wit
 **Claude Haiku 5.5** (`claude-haiku-5-5`). Each observation starts a fresh conversation
 with the instruction, current preview, session limits, history availability, and
 latest factual capture outcome. Claude can list history, retrieve earlier images,
-or request a photograph. An ordinary end of turn finishes the observation without
-shooting. No explanations are required. Low effort and disabled thinking remain
+request a photograph, or change the preview interval in Auto mode. An ordinary end
+of turn finishes the observation without shooting and keeps the current interval.
+No explanations are required. Low effort and disabled thinking remain
 configured. Refusals, malformed responses, and API failures end monitoring.
 
 ## Camera compatibility
@@ -107,9 +108,11 @@ or `--port 8766` to choose another port. Keep the terminal running. This command
 only launches the interface; instructions, settings, connection checks, and monitoring
 are controlled in the browser.
 
-1. Enter an instruction, or choose an example. Set the observation interval in
-   **seconds**, duration in **minutes**, and photo limit. Defaults are 60 seconds,
-   60 minutes, and one photo. Under **AI budget**, **Maximum AI calls** defaults to 360.
+1. Enter an instruction, or choose an example. **Preview timing** defaults to
+   **Auto**: Claude chooses intervals between **10 seconds and 5 minutes**. Choose
+   **Fixed** to set an interval in seconds (default 60). Set duration in **minutes**
+   and photo limit; defaults are 60 minutes and one photo.
+   Under **AI budget**, **Maximum AI calls** defaults to 360.
    Each observation can use up to six calls; the header counts calls and previews separately.
 2. Optionally **Check connection** to detect the camera, assess capabilities, and
    see a preview. This does not call Claude, enable capture, or take a photo.
@@ -118,6 +121,8 @@ are controlled in the browser.
    card with its run's vertical activity trace beneath the image. The latest card
    expands automatically; older cards can be independently expanded or collapsed.
    The timeline shows sampled observations, not a continuous video feed.
+   In Auto mode, the header shows the current interval. Expand a preview card to
+   see any interval change, such as **300 → 10 sec**, alongside other activity.
 4. Open any thumbnail in the image viewer. History retrievals appear inside the
    requesting card, with thumbnails and links back to their original observations.
    Scrolling back preserves your position while monitoring continues. **Return to
@@ -146,24 +151,50 @@ The interface itself loads no external fonts, scripts, or analytics.
 
 ## The observation loop
 
-The first observation happens immediately after camera setup. Subsequent observations
-follow the **Observe every** setting on the session's schedule (default **60 seconds**):
+The first observation happens immediately after camera setup. **Auto** is the
+default preview timing mode; **Fixed** keeps a regular schedule.
 
 1. Retrieve a fresh camera preview and save it locally.
 2. Start a fresh agent conversation with the instruction, timestamped preview,
-   session limits, available history, and latest capture facts.
+   session limits, available history, latest capture facts, preview timing mode,
+   interval bounds, and the current interval.
 3. Check capacity, then call Claude. A response may contain one tool call or end
    the observation without a photograph.
 4. Return history tool results to Claude and continue within the same run. A `shoot`
    call uses the capture safeguards, records its actual outcome, and automatically
-   finishes the observation, with no extra inference afterward.
+   finishes the observation, with no extra inference afterward. In Auto mode, a
+   successful `set_preview_interval` call also finishes the observation without
+   another inference or a photograph.
 5. Wait for the next scheduled observation, then start another fresh run.
 
+**Auto mode:** each new session starts at **60 seconds**. Claude calls
+`set_preview_interval(seconds)` only when a different interval is needed, within
+the **10 to 300 second** bounds. No reason is requested. The guidance is to wait longer when history shows a
+stable scene far from the target, and check sooner as the desired moment approaches.
+Claude can retrieve earlier images to assess change. The current interval is
+included in every observation's context and persists until a valid tool call
+changes it. Plain end turns, photographs, rejected changes, expired previews, and
+run limits all keep the current interval. A successful change takes effect for the
+next preview and ends the observation without another inference. Starting a new
+session resets Auto to 60 seconds.
+
+Auto's interval is measured from the current preview's host timestamp, including
+retrieval and processing time. If processing outlasts that interval, the next
+preview is taken as soon as the current observation finishes. Observations never
+overlap and missed previews are not replayed. The countdown reflects the next
+scheduled observation or the session deadline, whichever comes first.
+
+**Fixed mode:** observations follow **Observe every** (default **60 seconds**) on
+the session's original schedule. Processing does not add drift. An operation that
+overruns a scheduled slot skips it; there are no catch-up bursts. The scheduling
+tool is neither offered nor accepted in Fixed mode.
+
 Everything runs sequentially: there is one inference in flight and no background
-preview sampler. Camera and API processing time do not add drift to the schedule.
-An operation that overruns a scheduled observation skips that slot; there are no
-catch-up bursts. Every sampled preview is retained, but the program does not save
-every frame from the camera's live stream. Events between observations may be missed.
+preview sampler or scene-change detector. During a long wait, a new event cannot
+be detected until the next preview. Auto can reduce checks during quiet periods,
+but may miss a brief clearing between them. Field performance and net resource
+savings remain unmeasured. Every sampled preview is retained; the program does not
+save every frame from the camera's live stream.
 
 **Watch for** defaults to **60 minutes**, measured after connection/setup.
 **Maximum AI calls** defaults to **360** across the session. A run can make up to
@@ -181,19 +212,27 @@ session deadline. An SDK operation already in progress may take time to finish.
 Use **Check connection** for a local preview without an API key, inference call,
 shutter command, or changes to capture settings.
 
-## History tools and capacity
+## Agent tools and capacity
 
 | Tool | Input | Result |
 | --- | --- | --- |
 | `list_history` | Optional `start_s`, `end_s`, `cursor`, `limit` | Earlier previews, newest first: IDs, timestamps, capture facts, and `next_cursor`. Defaults to 20, maximum 50. Time filters are inclusive seconds since monitoring began. |
 | `get_history` | `frame_ids`: one to eight distinct earlier IDs | Actual images, timestamps, and factual capture outcomes. |
 | `shoot` | No arguments | Downloaded, skipped, or failed capture outcome; always finishes the observation. |
+| `set_preview_interval` | Integer `seconds` (10–300); no other arguments | Auto only. Changes the persistent preview interval and finishes the observation without a photograph or another inference. The interval stays in effect until changed. Invalid arguments return a tool error the model can correct within its remaining calls. |
 
 History tools can access only earlier previews in the current session. They accept
 IDs, never arbitrary file paths. Invalid history requests produce a tool error the
 agent can correct within its remaining calls. There is no mandatory history lookup;
 the agent chooses when earlier images help. A successful download, its preview ID,
 and the latest capture outcome are included in subsequent runs as factual context.
+
+Interval changes are also saved in each run's transcript and activity trace.
+`results.json` records `settings.preview_mode`, `current_interval_s`, and the latest
+`last_interval_change` (previous seconds, new seconds, and triggering frame ID);
+each observation includes `next_preview_interval_s`. Refreshing the interface restores these
+values from the running server's report. Stop, session duration, preview freshness,
+and AI-call budgets still take precedence over scheduling decisions.
 
 Every observation's preview is saved under `previews/` at its received resolution
 as a JPEG. `previews/index.jsonl` records IDs, session timestamps, SDK frame numbers,

@@ -104,7 +104,7 @@ class CameraWorkflowTests(unittest.TestCase):
     def settings(self, **overrides):
         return fl.SessionSettings(**{
             "request": "Take a photo when white becomes black; do not repeat a captured change",
-            "duration": 180, "max_requests": 3, "max_shots": 3, "cooldown": 0, **overrides,
+            "duration": 180, "max_requests": 3, "max_shots": 3, "cooldown": 0, "preview_mode": "fixed", **overrides,
         })
 
     def report(self):
@@ -121,13 +121,14 @@ class CameraWorkflowTests(unittest.TestCase):
 
     def test_session_settings_defaults_and_validation(self):
         settings = fl.SessionSettings(request="landscape")
+        self.assertEqual(settings.preview_mode, "auto")
         self.assertEqual((settings.interval, settings.duration, settings.max_requests,
                           settings.max_shots, settings.max_frame_age, settings.cooldown),
                          (60, 3600, 360, 1, 30, 5))
         for invalid in ({"interval": 0}, {"interval": float("nan")}, {"duration": float("inf")},
                         {"interval": True}, {"duration": 10**400}, {"max_shots": 1.5},
                         {"max_requests": False}, {"cooldown": -1}, {"max_frame_age": 0},
-                        {"request": " "}, {"request": 3}):
+                        {"request": " "}, {"request": 3}, {"preview_mode": "adaptive"}, {"preview_mode": True}):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.settings(**invalid)
 
@@ -146,6 +147,133 @@ class CameraWorkflowTests(unittest.TestCase):
             self.assertEqual(len(self.journal(frame_id)), 3)
         self.assertNotIn("base64", (self.output / "runs/000000/conversation.jsonl").read_text())
         self.assertFalse((self.output / "conversation.jsonl").exists())
+
+    def test_auto_slows_down_then_speeds_up_and_captures_with_history(self):
+        self.replies = iter([
+            tool("set_preview_interval", {"seconds": 300}),
+            tool("get_history", {"frame_ids": [0]}, "compare"),
+            tool("set_preview_interval", {"seconds": 10}, "timing"),
+            answer("shoot"),
+        ])
+        fl.run_session(self.settings(preview_mode="auto", duration=500, max_requests=4, max_shots=1), self.output)
+        self.assertEqual(self.camera.frame_times, [100, 400, 410])
+        self.assertEqual(self.camera.captures, [0])
+        report = self.report()
+        self.assertEqual((report["previews_saved"], report["api_requests"], report["token_count_requests"]), (3, 4, 4))
+        self.assertEqual([entry["outcome"] for entry in report["observations"]],
+                         ["preview_interval_set", "preview_interval_set", "downloaded"])
+        self.assertTrue(all(entry["run_status"] == "finished" for entry in report["observations"]))
+        sampling = json.loads(self.inferences()[1]["messages"][0]["content"][0]["text"])["sampling"]
+        self.assertEqual((sampling["mode"], sampling["min_interval_s"], sampling["max_interval_s"]), ("auto", 10, 300))
+        self.assertEqual(sampling["current_interval_s"], 300)
+        self.assertEqual(self.tool_outcome()["seconds"], 300)
+        events = report["observations"][1]["events"]
+        scheduled = next(e for e in events if e.get("name") == "set_preview_interval" and e["status"] == "completed")
+        self.assertEqual(scheduled["seconds"], 10)
+        self.assertEqual(scheduled["previous_seconds"], 300)
+        self.assertEqual(report["current_interval_s"], 10)
+        self.assertEqual(report["last_interval_change"], {"previous_seconds": 300, "seconds": 10, "from_frame_id": 1})
+
+    def test_auto_interval_persists_after_plain_end_turn_and_capture(self):
+        self.replies = iter([answer("wait"), tool("set_preview_interval", {"seconds": 300}),
+                             answer("wait"), answer("shoot"), answer("wait")])
+        fl.run_session(self.settings(preview_mode="auto", interval=45, duration=1000, max_requests=5), self.output)
+        self.assertEqual(self.camera.frame_times, [100, 160, 460, 760, 1060])
+        self.assertEqual([entry["next_preview_interval_s"] for entry in self.report()["observations"]], [60, 300, 300, 300, 300])
+        self.assertEqual(self.report()["current_interval_s"], 300)
+        self.assertEqual(self.report()["last_interval_change"]["from_frame_id"], 1)
+        sampling = [json.loads(p["messages"][0]["content"][0]["text"])["sampling"] for p in self.inferences()]
+        self.assertEqual([s["current_interval_s"] for s in sampling], [60, 60, 300, 300, 300])
+        self.assertEqual(self.camera.captures, [0])
+        self.assertEqual(self.report()["api_requests"], 5)
+
+        # A new session starts at 60 seconds instead of inheriting the last session's setting.
+        self.replies = iter([answer("wait")])
+        destination = self.output / "new-session"
+        fl.run_session(self.settings(preview_mode="auto", max_requests=1), destination)
+        report = json.loads((destination / "results.json").read_text())
+        self.assertEqual(report["current_interval_s"], 60)
+        self.assertIsNone(report["last_interval_change"])
+
+    def test_auto_rejected_changes_and_run_limit_keep_current_interval(self):
+        self.replies = iter([tool("set_preview_interval", {"seconds": 300}),
+                             *[tool("set_preview_interval", {"seconds": 0}, f"bad-{i}") for i in range(6)],
+                             answer("wait")])
+        fl.run_session(self.settings(preview_mode="auto", duration=750, max_requests=8), self.output)
+        self.assertEqual(self.camera.frame_times, [100, 400, 700])
+        self.assertEqual(self.report()["observations"][1]["outcome"], "run_limit")
+        self.assertEqual([entry["next_preview_interval_s"] for entry in self.report()["observations"]], [300, 300, 300])
+        self.assertEqual(self.report()["last_interval_change"]["from_frame_id"], 0)
+
+    def test_auto_interval_is_measured_from_preview_not_response(self):
+        self.camera.frame_delay, self.count_delay, self.inference_delay = 2, 2, 3
+        self.replies = iter([tool("set_preview_interval", {"seconds": 10}), answer("wait"), answer("wait")])
+        fl.run_session(self.settings(preview_mode="auto"), self.output)
+        self.assertEqual(self.camera.frame_times, [100, 110, 120])
+
+    def test_auto_overrun_observes_again_when_ready_without_catchup(self):
+        self.inference_delay = 20
+        self.replies = iter([tool("set_preview_interval", {"seconds": 10}), answer("wait"), answer("wait")])
+        fl.run_session(self.settings(preview_mode="auto"), self.output)
+        self.assertEqual(self.camera.frame_times, [100, 120, 140])
+        self.assertEqual(self.report()["api_requests"], 3)
+
+    def test_auto_invalid_schedule_is_recoverable_without_applying_bad_interval(self):
+        invalid = [{"seconds": seconds} for seconds in (True, 9, 301, 10.5, "60", 10**100)]
+        invalid += [{}, {"seconds": 10, "reason": "Clouds."}, {"seconds": 10, "extra": 1}]
+        for index, arguments in enumerate(invalid):
+            with self.subTest(arguments=arguments):
+                destination = self.output / str(index)
+                self.replies = iter([tool("set_preview_interval", arguments, "bad"),
+                                     tool("set_preview_interval", {"seconds": 20}, "good")])
+                fl.run_session(self.settings(preview_mode="auto", max_requests=2), destination)
+                report = json.loads((destination / "results.json").read_text())
+                self.assertEqual((report["previews_saved"], report["current_interval_s"]), (1, 20))
+                entry = report["observations"][0]
+                self.assertEqual(entry["outcome"], "preview_interval_set")
+                self.assertTrue(any(e["kind"] == "tool" and e["status"] == "failed" for e in entry["events"]))
+                transcript = (destination / "runs/000000/conversation.jsonl").read_text()
+                self.assertIn('"is_error": true', transcript)
+
+    def test_auto_stale_response_cannot_change_interval(self):
+        def inference(*_, **__):
+            if self.camera.frames == 1:
+                return tool("set_preview_interval", {"seconds": 120})
+            self.clock.sleep(31)
+            return tool("set_preview_interval", {"seconds": 300})
+        with patch("waitless.call_model", side_effect=inference):
+            fl.run_session(self.settings(preview_mode="auto", max_requests=2), self.output)
+        self.assertEqual(self.report()["observations"][1]["outcome"], "stale_preview")
+        self.assertEqual(self.report()["current_interval_s"], 120)
+        self.assertEqual(self.report()["last_interval_change"]["from_frame_id"], 0)
+
+    def test_auto_long_wait_respects_session_deadline(self):
+        self.replies = iter([tool("set_preview_interval", {"seconds": 300})])
+        fl.run_session(self.settings(preview_mode="auto", duration=40), self.output)
+        self.assertEqual(self.camera.frame_times, [100])
+        self.assertEqual(self.clock.now, 140)
+        self.assertEqual(self.report()["stop_reason"], "duration")
+
+    def test_auto_stop_during_inference_rejects_scheduling(self):
+        stop = threading.Event()
+        def inference(*_, **__):
+            stop.set()
+            return tool("set_preview_interval", {"seconds": 300})
+        with patch("waitless.call_model", side_effect=inference):
+            fl.run_session(self.settings(preview_mode="auto"), self.output, stop_event=stop)
+        self.assertEqual(self.report()["status"], "stopped")
+        self.assertEqual(self.report()["current_interval_s"], 60)
+        self.assertIsNone(self.report()["last_interval_change"])
+
+    def test_auto_stop_interrupts_long_wait(self):
+        stop = threading.Event()
+        self.replies = iter([tool("set_preview_interval", {"seconds": 300})])
+        with patch.object(stop, "wait", side_effect=lambda delay: stop.set()) as wait:
+            fl.run_session(self.settings(preview_mode="auto", duration=600), self.output, stop_event=stop)
+        wait.assert_called_once_with(300)
+        self.assertEqual(self.camera.frame_times, [100])
+        self.assertEqual(self.report()["status"], "stopped")
+        self.assertTrue(self.camera.closed)
 
     def test_changed_then_unchanged_replay_includes_successful_capture_in_chat(self):
         self.replies = iter([answer("wait"), answer("shoot"), answer("wait")])

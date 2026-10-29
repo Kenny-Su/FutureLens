@@ -34,9 +34,10 @@ time. WaitLess separates observation from capture:
 
 1. **Describe your moment.** Use a plain-language instruction about the subject,
    visibility, or light you want.
-2. **Let WaitLess watch.** It samples your Sony camera's live-view previews at your
-   chosen interval. Claude evaluates the scene and can compare earlier previews
-   when the instruction depends on a change.
+2. **Let WaitLess watch.** In the default **Auto mode**, Claude chooses when to
+   inspect the next live-view preview: less often while the mountain stays hidden,
+   more often as clouds clear. It can compare earlier previews to assess change.
+   Prefer a regular rhythm? Choose **Fixed** and set your own interval.
 3. **Capture when it matches.** When Claude identifies the requested condition,
    WaitLess asks the camera to take a photograph and downloads its original files.
    You choose exposure and image format on the camera.
@@ -61,6 +62,10 @@ time. WaitLess separates observation from capture:
 - **Choose how much to delegate.** Set observation frequency, session duration,
   photo limits, and an AI-call budget. Review previews and capture outcomes in the
   local browser interface while monitoring continues.
+- **Spend attention where the scene is changing.** Auto mode lets the model space
+  out checks during quiet periods and bring them closer together as your moment
+  approaches. It keeps the current interval until a change is needed; interval
+  changes appear in the preview timeline.
 
 Live view, the connected computer, and AI evaluation still have power and API
 costs. Net battery savings have not been measured.
@@ -89,7 +94,12 @@ Claude for evaluation; preview copies and downloaded photographs are stored loca
 It is best suited to scenes that change slowly enough for a preview to be evaluated
 and the shutter to respond. Recognition is experimental: events between
 observations or during processing may be missed, and a visual match is not
-guaranteed. The default observation interval is one minute.
+guaranteed. Auto mode starts at **60 seconds** and allows intervals from **10 seconds
+to 5 minutes**. The chosen interval stays in effect until the model changes it,
+including after a photograph. There is no background
+scene detection between previews: a change that begins during a longer pause
+will only be noticed at the next check. Adaptive recognition and resource savings
+still need field testing.
 
 Hardware testing so far has used a **Sony A7 IV**. Other models need on-device
 verification; WaitLess checks camera capabilities before enabling capture. See the

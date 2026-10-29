@@ -12,7 +12,8 @@ from camera import SonyCamera, CameraError, DEFAULT_HELPER
 from history import PreviewArchive, AgentJournal, capture_outcome
 from model import (API_ENDPOINT, INSTRUCTIONS, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES, MAX_INPUT_TOKENS,
                    ApiError, CapacityReached, call_model, check_capacity, count_tokens, image_content,
-                   load_config, make_payload, parse_turn, text_content, validate_config, MAX_CALLS_PER_OBSERVATION)
+                   load_config, make_payload, parse_turn, text_content, validate_config, MAX_CALLS_PER_OBSERVATION,
+                   AUTO_MIN_INTERVAL, AUTO_MAX_INTERVAL, AUTO_INITIAL_INTERVAL)
 
 
 @dataclass(frozen=True)
@@ -24,8 +25,11 @@ class SessionSettings:
     max_shots: int = 1
     max_frame_age: float = 30
     cooldown: float = 5
+    preview_mode: str = "auto"
 
     def __post_init__(self):
+        if self.preview_mode not in ("auto", "fixed"):
+            raise ValueError("Preview mode must be auto or fixed.")
         if not isinstance(self.request, str) or not self.request.strip() or len(self.request) > 8000:
             raise ValueError("Enter an instruction (up to 8,000 characters).")
         for name in ("duration", "interval", "max_frame_age", "cooldown"):
@@ -134,6 +138,10 @@ class Monitor:
                                "cooldown_remaining_s": max(0, self.settings.cooldown - (time.monotonic() - self.last_capture))},
                    "history": {"count": preview.id, "first_frame_id": 0 if preview.id else None,
                                "latest_frame_id": preview.id - 1 if preview.id else None},
+                   "sampling": {"mode": self.settings.preview_mode,
+                                "current_interval_s": self.report["current_interval_s"],
+                                "min_interval_s": AUTO_MIN_INTERVAL if self.settings.preview_mode == "auto" else self.settings.interval,
+                                "max_interval_s": AUTO_MAX_INTERVAL if self.settings.preview_mode == "auto" else self.settings.interval},
                    "latest_capture_outcome": self.latest_capture_outcome,
                    "last_downloaded_capture": self.last_downloaded_capture}
         message = {"role": "user", "content": [text_content(initial), image_content(preview.image())]}
@@ -152,7 +160,7 @@ class Monitor:
                 active = ("model", action_id)
                 self.report["phase"] = "checking"
                 journal.event("model", "checking", action_id, turn=turn)
-                payload = make_payload(messages)
+                payload = make_payload(messages, preview_mode=self.settings.preview_mode)
                 metrics = check_capacity(payload)
                 outcome = self.expired(preview)
                 if outcome:
@@ -180,7 +188,7 @@ class Monitor:
                     break
                 before = time.monotonic()
                 response = call_model(payload, self.config, timeout=min(90, self.deadline - before))
-                call = parse_turn(response, seen_ids)
+                call = parse_turn(response, seen_ids, preview_mode=self.settings.preview_mode)
                 message = {"role": "assistant", "content": response["content"]}
                 messages.append(message)
                 journal.message(message)
@@ -192,7 +200,8 @@ class Monitor:
                 name, arguments, call_id = call["name"], call["input"], call["id"]
                 active = ("tool", "tool:" + call_id)
                 journal.event("tool", "started", "tool:" + call_id, name=name, arguments=arguments)
-                self.report["phase"] = "retrieving" if name != "shoot" else "capturing"
+                self.report["phase"] = ("capturing" if name == "shoot" else
+                                        "scheduling" if name == "set_preview_interval" else "retrieving")
                 self.publish()
                 images, is_error, summary = [], False, {}
                 if name == "shoot":
@@ -212,7 +221,18 @@ class Monitor:
                     summary = {"error": outcome}
                 else:
                     try:
-                        if name == "list_history":
+                        if name == "set_preview_interval":
+                            seconds = arguments.get("seconds")
+                            if (set(arguments) != {"seconds"} or type(seconds) is not int
+                                    or not AUTO_MIN_INTERVAL <= seconds <= AUTO_MAX_INTERVAL):
+                                raise ValueError(f"Use only integer seconds from {AUTO_MIN_INTERVAL} to {AUTO_MAX_INTERVAL}.")
+                            result = {"previous_seconds": self.report["current_interval_s"],
+                                      "seconds": seconds, "from_frame_id": preview.id}
+                            entry["next_preview_interval_s"] = seconds
+                            self.report.update(current_interval_s=seconds, last_interval_change=result)
+                            content = [text_content(result)]
+                            summary = result
+                        elif name == "list_history":
                             result = self.archive.list_history(preview.id, arguments)
                             content = [text_content(result)]
                             summary = {"count": len(result["previews"]), "next_cursor": result["next_cursor"]}
@@ -235,6 +255,9 @@ class Monitor:
                 if name == "shoot":
                     outcome = entry["capture_status"]
                     break
+                if name == "set_preview_interval" and not is_error:
+                    outcome = "preview_interval_set"
+                    break
                 outcome = self.expired(preview)
                 if outcome:
                     break
@@ -256,7 +279,7 @@ class Monitor:
             if active:
                 journal.event(active[0], "skipped", active[1], reason=outcome)
             if entry["run_status"] != "failed":
-                entry["run_status"] = "finished" if outcome in ("no_photo", "downloaded") else "skipped"
+                entry["run_status"] = "finished" if outcome in ("no_photo", "downloaded", "preview_interval_set") else "skipped"
             entry.update(outcome=outcome, frame_age_s=time.monotonic() - preview.received_at)
             self.archive.record_outcome(entry)
             if entry["capture_status"] != "not_requested":
@@ -296,7 +319,8 @@ class Monitor:
                 self.publish()
                 preview = self.archive.append(self.camera.latest_frame())
                 entry = {**preview.metadata(), "preview_file": str(preview.path.relative_to(self.output)),
-                         "model_calls": 0, "run_status": "saved", "capture_status": "not_requested"}
+                         "model_calls": 0, "run_status": "saved", "capture_status": "not_requested",
+                         "next_preview_interval_s": self.report["current_interval_s"]}
                 self.report["observations"].append(entry)
                 self.report["previews_saved"] = self.archive.count
                 self.publish()
@@ -313,9 +337,12 @@ class Monitor:
                 if self.report["photos_taken"] >= self.settings.max_shots:
                     self.report["stop_reason"] = "max_shots"
                     break
-                next_sample += self.settings.interval
-                if next_sample < time.monotonic():
-                    next_sample = start + math.ceil((time.monotonic() - start) / self.settings.interval) * self.settings.interval
+                if self.settings.preview_mode == "auto":
+                    next_sample = max(time.monotonic(), preview.received_at + entry["next_preview_interval_s"])
+                else:
+                    next_sample += self.settings.interval
+                    if next_sample < time.monotonic():
+                        next_sample = start + math.ceil((time.monotonic() - start) / self.settings.interval) * self.settings.interval
                 self.report.update(phase="waiting", next_observation_at=time.time() + max(0, next_sample - time.monotonic()))
                 self.publish()
         if not self.report["previews_saved"]:
@@ -340,7 +367,10 @@ def run_session(settings: SessionSettings, output: Path, *, camera_helper=DEFAUL
         "instructions": INSTRUCTIONS, "request": settings.request,
         "source": "sony:usb", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
-                     ("duration", "interval", "max_requests", "cooldown", "max_frame_age", "max_shots")},
+                     ("duration", "interval", "preview_mode", "max_requests", "cooldown", "max_frame_age", "max_shots")},
+        "auto_interval_bounds_s": {"min": AUTO_MIN_INTERVAL, "max": AUTO_MAX_INTERVAL, "initial": AUTO_INITIAL_INTERVAL},
+        "current_interval_s": AUTO_INITIAL_INTERVAL if settings.preview_mode == "auto" else settings.interval,
+        "last_interval_change": None,
         "capacity_limits": {"images": MAX_IMAGES, "request_bytes": MAX_REQUEST_BYTES, "input_tokens": MAX_INPUT_TOKENS},
         "calls_per_observation": MAX_CALLS_PER_OBSERVATION,
         "observations": [], "previews_saved": 0, "photos_taken": 0,
