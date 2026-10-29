@@ -1,6 +1,6 @@
-# FutureLens camera runtime
+# WaitLess camera runtime
 
-This directory is an application component shipped with FutureLens. Users do not
+This directory is an application component shipped with WaitLess. Users do not
 need to obtain Sony's SDK, install a compiler, or build the camera helper.
 
 `macos/sony_camera` is our prebuilt universal helper for Apple silicon and Intel
@@ -13,8 +13,8 @@ and the SDK documentation are not distributed here.
 
 Sony's [license](https://support.d-imaging.sony.co.jp/app/sdk/licenseagreement/en.html)
 continues to govern its proprietary libraries. Distribute this component with
-FutureLens; do not treat it as a standalone SDK or relicense Sony's files as
-project source. FutureLens is independently developed and supported.
+WaitLess; do not treat it as a standalone SDK or relicense Sony's files as
+project source. WaitLess is independently developed and supported.
 
 ## Open-source notices and source
 

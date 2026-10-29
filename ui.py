@@ -1,4 +1,4 @@
-"""Serve the FutureLens camera interface locally, without a frontend build step."""
+"""Serve the WaitLess camera interface locally, without a frontend build step."""
 
 import argparse
 from datetime import datetime
@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlsplit
 import webbrowser
 
 from camera import SonyCamera, DEFAULT_HELPER
-from futurelens import SessionSettings, run_session
+from waitless import SessionSettings, run_session
 from model import load_config, validate_config
 
 ROOT = Path(__file__).resolve().parent
@@ -51,7 +51,7 @@ class SessionManager:
         if self.operation is not None:
             raise ValueError("A camera operation is already running.")
         self.operation = operation
-        self.worker = threading.Thread(target=target, name="futurelens-camera")
+        self.worker = threading.Thread(target=target, name="waitless-camera")
         self.worker.start()
 
     def start(self, data):
@@ -216,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
-        if (not self._trusted() or not secrets.compare_digest(self.headers.get("X-FutureLens-Token", ""),
+        if (not self._trusted() or not secrets.compare_digest(self.headers.get("X-WaitLess-Token", ""),
                                                              self.server.manager.token)):
             self._json({"error": "Reload the local interface and try again."}, 403)
             return
@@ -247,7 +247,7 @@ def main():
     manager = SessionManager()
     with LocalServer(("127.0.0.1", args.port), manager) as server:
         url = f"http://127.0.0.1:{server.server_port}"
-        print(f"FutureLens: {url}\nKeep this terminal open. Ctrl-C stops monitoring and closes the server.", flush=True)
+        print(f"WaitLess: {url}\nKeep this terminal open. Ctrl-C stops monitoring and closes the server.", flush=True)
         if not args.no_open:
             webbrowser.open(url)
         try:

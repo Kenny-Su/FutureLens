@@ -12,7 +12,7 @@
 #include "CrDeviceProperty.h"
 #include "CrControlCode.h"
 
-namespace futurelens {
+namespace waitless {
 namespace sdk = SCRSDK;
 
 struct Device {
@@ -165,4 +165,4 @@ inline Capabilities assess(const Snapshot& state) {
     }
     return result;
 }
-} // namespace futurelens
+} // namespace waitless

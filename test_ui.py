@@ -50,11 +50,11 @@ class InterfaceTests(unittest.TestCase):
             self.assertTrue(kwargs["enable_capture"])
             self.assertEqual(kwargs["helper"], self.helper)
             return FakeCamera(clock, output.parent)
-        with patch("futurelens.SonyCamera", side_effect=camera), \
-                patch("futurelens.load_config", return_value=ApiConfig(api_key="offline-test")), \
-                patch("futurelens.count_tokens", return_value=1000), \
-                patch("futurelens.call_model", return_value=answer("shoot")) as inference, \
-                patch("futurelens.time.monotonic", side_effect=clock.monotonic):
+        with patch("waitless.SonyCamera", side_effect=camera), \
+                patch("waitless.load_config", return_value=ApiConfig(api_key="offline-test")), \
+                patch("waitless.count_tokens", return_value=1000), \
+                patch("waitless.call_model", return_value=answer("shoot")) as inference, \
+                patch("waitless.time.monotonic", side_effect=clock.monotonic):
             self.manager.start({"request": "Capture this scene", "duration_minutes": 2,
                                 "interval": 45, "max_shots": 1, "max_requests": 3})
             self.manager.worker.join(2)
@@ -159,7 +159,7 @@ class HttpTests(unittest.TestCase):
             start.assert_not_called()
 
     def test_authorized_post_validates_json_and_calls_control_once(self):
-        headers = {"X-FutureLens-Token": self.manager.token, "Content-Type": "application/json"}
+        headers = {"X-WaitLess-Token": self.manager.token, "Content-Type": "application/json"}
         with patch.object(self.manager, "start") as start:
             self.assertEqual(self.request("POST", "/api/start", '{"request":"scene"}', headers)[0], 202)
             start.assert_called_once_with({"request": "scene"})

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from camera import CameraError, CameraFrame, SonyCamera
-import futurelens as fl
+import waitless as fl
 import model
 from test_model import answer, tool
 
@@ -76,16 +76,16 @@ class CameraWorkflowTests(unittest.TestCase):
         self.count_delay = self.inference_delay = 0
         self.tokens = 1000
         for target, kwargs in [
-            ("futurelens.SonyCamera", {"return_value": self.camera}),
-            ("futurelens.load_config", {"return_value": model.ApiConfig(api_key="offline-test")}),
+            ("waitless.SonyCamera", {"return_value": self.camera}),
+            ("waitless.load_config", {"return_value": model.ApiConfig(api_key="offline-test")}),
             ("model._post", {"side_effect": self.api}),
-            ("futurelens.time.monotonic", {"side_effect": self.clock.monotonic}),
-            ("futurelens.time.sleep", {"side_effect": self.clock.sleep}),
+            ("waitless.time.monotonic", {"side_effect": self.clock.monotonic}),
+            ("waitless.time.sleep", {"side_effect": self.clock.sleep}),
         ]:
             patched = patch(target, **kwargs)
             active = patched.start()
             self.addCleanup(patched.stop)
-            if target == "futurelens.SonyCamera":
+            if target == "waitless.SonyCamera":
                 self.factory = active
 
     def api(self, endpoint, payload, config, timeout):
@@ -274,7 +274,7 @@ class CameraWorkflowTests(unittest.TestCase):
             if report.get("observations") and report["observations"][-1].get("capture_status") == "requested":
                 self.clock.sleep(31)
             write(path, report)
-        with patch("futurelens.write_json", side_effect=delayed_write):
+        with patch("waitless.write_json", side_effect=delayed_write):
             fl.run_session(self.settings(max_requests=1), self.output)
         self.assertEqual(self.camera.captures, [])
         self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_expired_before_shutter")
@@ -336,7 +336,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertTrue(self.camera.closed)
 
     def test_failed_token_count_never_falls_back_to_inference(self):
-        with patch("futurelens.count_tokens", side_effect=RuntimeError("count failed")), self.assertRaises(RuntimeError):
+        with patch("waitless.count_tokens", side_effect=RuntimeError("count failed")), self.assertRaises(RuntimeError):
             fl.run_session(self.settings(), self.output)
         self.assertEqual(self.requests, [])
         self.assertEqual(self.report()["token_count_requests"], 1)
@@ -399,7 +399,7 @@ class CameraWorkflowTests(unittest.TestCase):
         def count(*_, **__):
             stop.set()
             return 1000
-        with patch("futurelens.count_tokens", side_effect=count):
+        with patch("waitless.count_tokens", side_effect=count):
             fl.run_session(self.settings(), self.output, stop_event=stop)
         self.assertEqual(self.inferences(), [])
         self.assertEqual(self.camera.captures, [])
@@ -422,7 +422,7 @@ class CameraWorkflowTests(unittest.TestCase):
         def inference(*_, **__):
             stop.set()
             return answer("shoot")
-        with patch("futurelens.call_model", side_effect=inference):
+        with patch("waitless.call_model", side_effect=inference):
             fl.run_session(self.settings(), self.output, stop_event=stop)
         self.assertEqual(self.camera.captures, [])
         self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_user_stop")
@@ -436,7 +436,7 @@ class CameraWorkflowTests(unittest.TestCase):
             write(path, report)
             if report.get("observations") and report["observations"][-1].get("capture_status") == "requested":
                 stop.set()
-        with patch("futurelens.write_json", side_effect=stopping_write):
+        with patch("waitless.write_json", side_effect=stopping_write):
             fl.run_session(self.settings(), self.output, stop_event=stop)
         self.assertEqual(self.camera.captures, [])
         self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_user_stop")
@@ -466,7 +466,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.factory.assert_not_called()
 
     def test_journal_initialization_failure_marks_preview_not_sent(self):
-        with patch("futurelens.AgentJournal", side_effect=OSError("disk full")), self.assertRaises(OSError):
+        with patch("waitless.AgentJournal", side_effect=OSError("disk full")), self.assertRaises(OSError):
             fl.run_session(self.settings(), self.output)
         entry = self.report()["observations"][0]
         self.assertEqual((entry["run_status"], entry["outcome"], entry["model_calls"]), ("failed", "error", 0))

@@ -1,94 +1,100 @@
-# FutureLens
+# WaitLess
 
-**Describe the moment worth waiting for.**
+**Delegate the waiting.**
 
-The village becomes visible through the fog. Sunrise lights the mountain summit.
-Tell FutureLens what you want to see in the photograph, and let it watch the scene
-for you.
+A mountain emerges from the clouds. Fog lifts from a village. The first light
+reaches a summit. You know the photograph you want; you just don't know when it
+will happen.
 
-FutureLens uses Claude to evaluate your Sony camera's live view against your
-instruction. Each observation starts a fresh agent run. Claude can look up earlier previews,
-retrieve their images, and compare how the scene has changed. Every sampled preview
-is saved locally.
-When Claude identifies a match, your camera takes the photograph and sends the
-original file to your computer.
+WaitLess watches your camera's scene for the moment you describe. It inspects
+lightweight previews and triggers a full-resolution photograph when it identifies
+a match. The goal: spend less time waiting for the shot, with fewer files to sort
+through afterward.
 
-> “Take one photo when the village below is clearly visible through the fog.”
+> “Take one photo when the mountain summit is clearly visible through the clouds.”
 
-## From instruction to photograph
+**[Get started with WaitLess →](docs/usage.md)**
 
-1. **Describe the shot.** Give FutureLens a visual condition to look for.
-2. **Set the session.** Choose how often to inspect the scene, how long to watch,
-   and how many photos to take.
-3. **Let the camera shoot.** Claude inspects the current view, retrieves earlier
-   observations when useful, and requests a photograph when it identifies a match.
-4. **Watch the story unfold.** Browse a timeline of every preview, with each
-   agent run's activity beneath it. Saved photographs stand out, with access to
-   the original files. Exploring earlier frames keeps
-   monitoring running.
+## The moment is unpredictable. The waiting is real.
 
-## Moments to capture
+A photographer may watch a scene for hours for an event that lasts only briefly.
+The composition is ready, the camera is set, but the clouds won't follow a schedule.
+Keeping your eyes on the scene takes attention; looking away risks missing the
+moment you came for.
 
-| Scene | Example instruction |
+An intervalometer offers a practical solution: keep taking photographs, then choose
+the right one later. But frequent full-resolution captures consume storage and
+battery, and leave a collection of near-identical images to review. The waiting
+becomes sorting.
+
+## Observe frequently. Capture selectively.
+
+Watching a scene doesn't need to mean taking a full-resolution photograph every
+time. WaitLess separates observation from capture:
+
+1. **Describe your moment.** Use a plain-language instruction about the subject,
+   visibility, or light you want.
+2. **Let WaitLess watch.** It samples your Sony camera's live-view previews at your
+   chosen interval. Claude evaluates the scene and can compare earlier previews
+   when the instruction depends on a change.
+3. **Capture when it matches.** When Claude identifies the requested condition,
+   WaitLess asks the camera to take a photograph and downloads its original files.
+   You choose exposure and image format on the camera.
+
+| | Interval shooting | WaitLess |
+| --- | --- | --- |
+| During the wait | A full-resolution photograph at each interval | A lightweight preview at each observation |
+| What triggers a photograph | The next scheduled interval | A match to your visual instruction |
+| After the session | Search the captured sequence for the moment | Review selective captures alongside a preview timeline |
+
+## Less watching. Less sorting. Your camera's quality.
+
+- **Delegate the waiting.** Leave the connected camera and computer monitoring
+  the scene instead of continuously watching it yourself. The aim is to preserve
+  the opportunity to capture your moment while freeing your attention.
+- **Keep fewer unnecessary originals.** When the requested condition is rare,
+  selective capture can reduce the full-resolution files you store, transfer, and
+  review. Every sampled preview is still saved locally as a record of the session.
+- **Keep the photograph you came for.** Captures are separate camera exposures,
+  with JPEG, HEIF, RAW, or paired files according to the camera's recording and
+  transfer settings.
+- **Choose how much to delegate.** Set observation frequency, session duration,
+  photo limits, and an AI-call budget. Review previews and capture outcomes in the
+  local browser interface while monitoring continues.
+
+Live view, the connected computer, and AI evaluation still have power and API
+costs. Net battery savings have not been measured.
+
+## What would you wait for?
+
+| Moment | Example instruction |
 | --- | --- |
-| A village emerging from fog | “Take one photo when the village below is clearly visible through the fog.” |
-| Sunrise over a mountain | “Capture the mountain when warm sunrise light is visible on its summit.” |
-| Smart timelapse of an apartment building — experimental | “Take one photo of the building each time another apartment goes dark.” |
+| A mountain emerging from clouds | “Take one photo when the mountain summit is clearly visible through the clouds.” |
+| A village revealed by lifting fog | “Take one photo when the village below is clearly visible through the fog.” |
+| Sunrise reaching a summit | “Capture the mountain when warm sunrise light is visible on its summit.” |
+| A building going to sleep | “Take one photo of the building each time another apartment goes dark.” |
 
-The fog and sunrise instructions describe a result visible in the current preview:
-the village in view or the summit lit.
+The last example explores **smart timelapse**: a sequence that advances when the
+scene changes. WaitLess can retrieve earlier previews to compare observations;
+reliably recognizing each change still needs field testing.
 
-**Smart timelapse uses visual history.** Claude can retrieve the session's earlier
-images and sees factual capture outcomes when deciding whether to request another
-photograph.
-The aim is a sequence that advances as apartments go dark. This is experimental;
-recognizing every change accurately in a real building still needs field testing.
+## Try it today
 
-## You choose the moment—and the limits
+WaitLess is an early tool for **macOS and one Sony camera connected over USB**,
+controlled through a local browser interface. The camera runtime is included for
+Apple silicon and Intel Macs; normal setup needs no SDK download or native build.
+You'll need Python 3.11+ and an Anthropic API key. Sampled previews are sent to
+Claude for evaluation; preview copies and downloaded photographs are stored locally.
 
-- **Scene-specific triggers.** Combine subjects, visibility, light, and composition
-  in a plain-language instruction.
-- **Visual memory on demand.** Every preview stays in a local archive. Claude can
-  list past observations and retrieve the images it needs for each decision.
-- **Original camera files.** Download JPEG, HEIF, RAW, or paired files according
-  to your camera's recording and transfer settings.
-- **Adjustable sessions.** Set inspection frequency, session duration, photo
-  limits, and the maximum number of AI calls. The default is one observation
-  per minute, suited to watching landscapes over time.
-- **Controlled repeat shots.** Claude receives the actual results of earlier
-  capture requests. The app enforces cooldowns and photo limits.
-- **Automatic camera detection.** Connect one supported Sony camera over USB.
-  FutureLens checks its capabilities before enabling capture and supports
-  autofocus or manual focus, depending on the camera's configuration.
-- **A record of every session.** Review decisions, capture outcomes, and downloaded
-  files. Local preview checks help you check framing before an automated session.
-- **A quiet camera workspace.** Set your instruction and limits, then move into
-  a timeline of previews and agent activity, with compact session controls.
-  A photo is highlighted only after its download succeeds.
+It is best suited to scenes that change slowly enough for a preview to be evaluated
+and the shutter to respond. Recognition is experimental: events between
+observations or during processing may be missed, and a visual match is not
+guaranteed. The default observation interval is one minute.
 
-## Sony camera support
+Hardware testing so far has used a **Sony A7 IV**. Other models need on-device
+verification; WaitLess checks camera capabilities before enabling capture. See the
+[camera compatibility guide](docs/usage.md#camera-compatibility) for details.
 
-FutureLens uses the **Sony Camera Remote SDK**. See
-[Sony's official compatibility page](https://support.d-imaging.sony.co.jp/app/sdk/en/)
-for supported cameras and firmware requirements.
-
-FutureLens works over **USB** and checks the connected camera's capabilities
-before enabling capture. Available features depend on the camera, firmware,
-settings, and installed SDK version.
-
-## Available today
-
-FutureLens is an early camera tool for **macOS and one Sony USB camera**, controlled
-through a local browser interface. The macOS camera runtime is included for Apple
-silicon and Intel Macs, so users can clone the repository and run FutureLens without
-downloading Sony's SDK or compiling native code.
-You set exposure and image format on the camera; FutureLens handles the capture
-decision. It suits scenes that remain visible long enough for a preview to be
-evaluated and the shutter to respond.
-
-AI decisions use Anthropic's Claude API and require your API key. Each run starts
-with the current preview; historical images are sent only when retrieved. Sessions
-stop when they reach their limits or request capacity; local history is preserved. Preview copies and downloaded photographs are saved
-on your computer.
-
-**[Try FutureLens →](docs/usage.md)** — setup, camera operation, and troubleshooting.
+**[Set up WaitLess →](docs/usage.md#setup)** ·
+[Camera operation and troubleshooting](docs/usage.md#control-a-sony-camera-over-usb-macos) ·
+[Development and tests](docs/usage.md#code-and-checks)

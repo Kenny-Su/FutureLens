@@ -25,7 +25,7 @@ class RuntimeTests(unittest.TestCase):
 
     @unittest.skipUnless(platform.system() == "Darwin", "The bundled runtime targets macOS")
     def test_relocated_runtime_loads_without_opening_a_camera(self):
-        with tempfile.TemporaryDirectory(prefix="futurelens clone ") as folder:
+        with tempfile.TemporaryDirectory(prefix="waitless clone ") as folder:
             relocated = Path(folder) / "runtime"
             shutil.copytree(RUNTIME / "macos", relocated)
             result = subprocess.run([str(relocated / "sony_camera"), "--check-runtime"],

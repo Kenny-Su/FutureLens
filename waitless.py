@@ -1,4 +1,4 @@
-"""Monitoring engine for the FutureLens camera interface."""
+"""Monitoring engine for the WaitLess camera interface."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone

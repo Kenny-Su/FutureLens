@@ -69,7 +69,7 @@ def bundle(sdk, source_zip, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sdk", type=Path, default=Path.home() / "Downloads/CrSDK_v2/SimpleCli.zip")
-    parser.add_argument("--bundle", action="store_true", help="Refresh the runtime shipped with FutureLens")
+    parser.add_argument("--bundle", action="store_true", help="Refresh the runtime shipped with WaitLess")
     parser.add_argument("--libusb-source", type=Path, help="Sony-supplied libusb.zip; defaults to the SDK's sibling source folder")
     args = parser.parse_args()
     if platform.system() != "Darwin":

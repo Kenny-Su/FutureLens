@@ -52,7 +52,7 @@ std::string strings_json(const std::vector<std::string>& values) {
     return result + ']';
 }
 
-std::string capabilities_json(const futurelens::Capabilities& caps) {
+std::string capabilities_json(const waitless::Capabilities& caps) {
     std::ostringstream out;
     out << std::boolalpha << "{\"live_view\":" << caps.live_view
         << ",\"capture_ready\":" << caps.capture_ready()
@@ -66,7 +66,7 @@ std::string capabilities_json(const futurelens::Capabilities& caps) {
     return out.str();
 }
 
-void require_capture(const futurelens::Capabilities& caps, const std::string& model) {
+void require_capture(const waitless::Capabilities& caps, const std::string& model) {
     if (caps.capture_ready()) return;
     std::string message = model + " is not ready for this photo workflow:";
     for (const auto& issue : caps.preview_issues) message += " " + issue;
@@ -110,7 +110,7 @@ class Camera : public sdk::IDeviceCallback {
         auto prop = property(code);
         const bool readable = prop.IsGetEnableCurrentValue();
         if (readable && prop.GetCurrentValue() == value) return;
-        auto values = futurelens::enum_values(prop.GetValueType(), prop.GetValues(), prop.GetValueSize());
+        auto values = waitless::enum_values(prop.GetValueType(), prop.GetValues(), prop.GetValueSize());
         if (!prop.IsSetEnableCurrentValue() || std::find(values.begin(), values.end(), value) == values.end())
             throw std::runtime_error("Camera setting does not allow the requested value: " + std::to_string(code));
         if (remember && !readable)
@@ -132,9 +132,9 @@ class Camera : public sdk::IDeviceCallback {
 public:
     std::string model;
 
-    futurelens::Snapshot snapshot() {
+    waitless::Snapshot snapshot() {
         healthy();
-        futurelens::Snapshot result;
+        waitless::Snapshot result;
         sdk::CrDeviceProperty* properties = nullptr;
         CrInt32 count = 0;
         auto error = sdk::GetDeviceProperties(handle, &properties, &count);
@@ -148,7 +148,7 @@ public:
             result.properties[prop.GetCode()] = {
                 prop.IsGetEnableCurrentValue(), prop.IsSetEnableCurrentValue(),
                 prop.IsGetEnableCurrentValue() ? prop.GetCurrentValue() : 0,
-                futurelens::enum_values(prop.GetValueType(), prop.GetValues(), prop.GetValueSize()),
+                waitless::enum_values(prop.GetValueType(), prop.GetValues(), prop.GetValueSize()),
             };
         }
         sdk::ReleaseDeviceProperties(handle, properties);
@@ -162,7 +162,7 @@ public:
         } else if (commands) {
             for (CrInt32u i = 0; i < command_count; ++i) {
                 if (commands[i].GetCode() != sdk::CrControlCode_Release) continue;
-                auto values = futurelens::enum_values(commands[i].GetValueType(), commands[i].GetValues(), commands[i].GetValueSize());
+                auto values = waitless::enum_values(commands[i].GetValueType(), commands[i].GetValues(), commands[i].GetValueSize());
                 result.shutter_release = std::find(values.begin(), values.end(), sdk::CrControlButton_Down) != values.end()
                     && std::find(values.begin(), values.end(), sdk::CrControlButton_Up) != values.end();
             }
@@ -205,13 +205,13 @@ public:
         initialized = sdk::Init();
         if (!initialized) throw std::runtime_error("Sony SDK initialization failed");
         check(sdk::EnumCameraObjects(&cameras, 3), "Enumerate cameras");
-        std::vector<futurelens::Device> devices;
+        std::vector<waitless::Device> devices;
         if (cameras) for (CrInt32u i = 0; i < cameras->GetCount(); ++i) {
             const auto* info = cameras->GetCameraObjectInfo(i);
             devices.push_back({info && info->GetModel() ? info->GetModel() : "Unknown Sony camera",
                                info && info->GetConnectionTypeName() ? info->GetConnectionTypeName() : ""});
         }
-        auto index = futurelens::select_usb(devices);
+        auto index = waitless::select_usb(devices);
         auto* selected = const_cast<sdk::ICrCameraObjectInfo*>(cameras->GetCameraObjectInfo(index));
         model = devices[index].model;
         std::cerr << "Detected USB camera: " << model << '\n';
@@ -250,7 +250,7 @@ public:
     }
 
     void prepare_capture() {
-        const auto caps = futurelens::assess(snapshot());
+        const auto caps = waitless::assess(snapshot());
         require_capture(caps, model); // Complete all checks before changing any setting.
         set_property(sdk::CrDeviceProperty_StillImageStoreDestination, *caps.destination);
         if (caps.adjustable_transfer_size)
@@ -264,7 +264,7 @@ public:
         const auto expires = std::chrono::steady_clock::now() + std::chrono::duration<double>(max_delay);
         // Recheck current settings after every model decision, before touching the shutter.
         const auto state = snapshot();
-        const auto caps = futurelens::assess(state);
+        const auto caps = waitless::assess(state);
         require_capture(caps, model);
         if (!prepared_destination || state.get(sdk::CrDeviceProperty_StillImageStoreDestination).current != *prepared_destination ||
             (caps.adjustable_transfer_size && state.get(sdk::CrDeviceProperty_Still_Image_Trans_Size).current != sdk::CrPropertyStillImageTransSize_Original))
@@ -388,7 +388,7 @@ int main(int argc, char** argv) {
         if (!fs::is_directory(output)) throw std::runtime_error("Output directory must exist");
         Camera camera;
         camera.connect();
-        auto capabilities = futurelens::assess(camera.snapshot());
+        auto capabilities = waitless::assess(camera.snapshot());
         std::cout << "{\"event\":\"ready\",\"connection\":\"USB\",\"model\":" << quote(camera.model)
                   << ",\"capabilities\":" << capabilities_json(capabilities) << "}" << std::endl;
         bool prepared = false;

@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const examples = {
+  clouds: "Take one photo when the mountain summit is clearly visible through the clouds.",
   fog: "Take one photo when the village below is clearly visible through the fog.",
   sunrise: "Capture the mountain when warm sunrise light is visible on its summit.",
   lights: "Take one photo of the building each time another apartment goes dark.",
@@ -38,7 +39,7 @@ function loadPreview(image, url) {
 
 async function api(path, data) {
   const response = await fetch(path, data === undefined ? { cache: "no-store" } : {
-    method: "POST", headers: { "Content-Type": "application/json", "X-FutureLens-Token": state.token }, body: JSON.stringify(data),
+    method: "POST", headers: { "Content-Type": "application/json", "X-WaitLess-Token": state.token }, body: JSON.stringify(data),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "The request could not be completed.");

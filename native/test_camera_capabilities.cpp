@@ -2,7 +2,7 @@
 #include "camera_capabilities.h"
 #include <iostream>
 
-using namespace futurelens;
+using namespace waitless;
 using namespace SCRSDK;
 
 void expect(bool condition, const char* message) {

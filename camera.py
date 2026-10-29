@@ -99,7 +99,7 @@ class SonyCamera:
 
     def __enter__(self):
         if not self.helper.is_file():
-            raise RuntimeError("The bundled camera runtime is missing. Restore runtime/sony from the FutureLens repository.")
+            raise RuntimeError("The bundled camera runtime is missing. Restore runtime/sony from the WaitLess repository.")
         self.output.mkdir(parents=True, exist_ok=True)
         self.log = (self.output.parent / "camera-sdk.log").open("wb")
         command = [str(self.helper), str(self.output)]

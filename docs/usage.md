@@ -1,13 +1,13 @@
-# Using FutureLens
+# Using WaitLess
 
 [Back to the project overview](../README.md)
 
 This guide covers setup, camera operation, troubleshooting, and development.
-Run the commands from the repository root. FutureLens runs on macOS 14.1 or later
+Run the commands from the repository root. WaitLess runs on macOS 14.1 or later
 (Apple silicon and Intel, subject to Sony's supported OS versions) and controls
 one Sony camera over USB through its local browser interface.
 
-Anthropic is the only supported API provider. FutureLens uses its Messages API with
+Anthropic is the only supported API provider. WaitLess uses its Messages API with
 **Claude Haiku 5.5** (`claude-haiku-5-5`). Each observation starts a fresh conversation
 with the instruction, current preview, session limits, history availability, and
 latest factual capture outcome. Claude can list history, retrieve earlier images,
@@ -19,13 +19,13 @@ configured. Refusals, malformed responses, and API failures end monitoring.
 
 See [Sony's official compatibility page](https://support.d-imaging.sony.co.jp/app/sdk/en/)
 for supported cameras and firmware requirements. Consult the API Reference included
-with your SDK for each camera's supported connection types. FutureLens uses USB;
+with your SDK for each camera's supported connection types. WaitLess uses USB;
 network connections are outside its current scope. Newly supported cameras may
-require a new FutureLens runtime release.
+require a new WaitLess runtime release.
 
 The bundled runtime uses Sony Camera Remote SDK 2.02.00. Hardware testing so far
 used an A7 IV
-(ILCE-7M4). Other models need on-device verification. FutureLens checks the
+(ILCE-7M4). Other models need on-device verification. WaitLess checks the
 connected camera's capabilities before enabling capture.
 
 ## Setup
@@ -73,7 +73,7 @@ The interface uses the included camera runtime automatically.
 
 Runtime license details, third-party notices, and the Sony-supplied libusb source
 are in [runtime/sony](../runtime/sony/README.md). The proprietary libraries are
-included as a component of FutureLens; their separate licenses continue to apply.
+included as a component of WaitLess; their separate licenses continue to apply.
 
 The helper considers every USB camera enumerated by the installed Sony SDK, without
 a fixed model whitelist. Network cameras are ignored. If multiple USB cameras are
@@ -81,7 +81,7 @@ found, it lists their models and asks you to connect only one; it never chooses 
 first arbitrarily. Camera/firmware compatibility is defined by the installed SDK;
 see [Sony's supported-device list](https://support.d-imaging.sony.co.jp/app/sdk/en/).
 
-Before capture, FutureLens checks live-view availability, the advertised shutter
+Before capture, WaitLess checks live-view availability, the advertised shutter
 command, still-photo exposure mode, Single Shooting drive mode, computer-transfer
 options, file type, and focus controls. It validates allowed property values as well as writability. All checks
 finish before capture settings are changed, and run again before each shutter
@@ -336,7 +336,7 @@ safeguards. Claude decisions, timing, and capture limits remain in Python.
 
 - `model.py`: fixed Anthropic transport, native tool payloads, strict turn validation, and capacity checks.
 - `history.py`: session-scoped history tools, per-run journals, and capture records.
-- `futurelens.py`: validated session settings, monitoring, capture policy, and result recording.
+- `waitless.py`: validated session settings, monitoring, capture policy, and result recording.
 - `ui.py` / `web/`: local camera interface, session controls, and preview timeline.
 - `camera.py`: persistent SDK-process adapter used by the interface and monitoring engine.
 - `native/sony_camera.cpp`: USB connection, live view, autofocus/shutter, and downloads.

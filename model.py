@@ -183,7 +183,7 @@ def api_error(exc: error.HTTPError) -> ApiError:
 def _post(endpoint: str, payload: dict, config: ApiConfig, timeout: float) -> dict:
     validate_config(config)
     headers = {"Content-Type": "application/json", "Accept": "application/json",
-               "User-Agent": "FutureLens", "x-api-key": config.api_key,
+               "User-Agent": "WaitLess", "x-api-key": config.api_key,
                "anthropic-version": API_VERSION}
     if config.workspace_id:
         headers["anthropic-workspace-id"] = config.workspace_id
