@@ -348,7 +348,11 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.inferences(), [])
 
     def test_history_tool_rounds_retrieve_images_then_shoot_without_an_extra_call(self):
-        self.replies = iter([answer("wait"), tool("list_history", call_id="list-1"),
+        history_call = tool("list_history", call_id="list-1")
+        history_call["content"] = [{"type": "thinking", "thinking": "", "signature": "opaque-signature"},
+                                   {"type": "redacted_thinking", "data": "opaque-encrypted-data"},
+                                   *history_call["content"]]
+        self.replies = iter([answer("wait"), history_call,
                              tool("get_history", {"frame_ids": [0]}, "get-1"), answer("shoot")])
         fl.run_session(self.settings(max_requests=10, max_shots=1), self.output)
         payloads = self.inferences()
@@ -358,6 +362,17 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.camera.captures, [0])
         self.assertEqual(self.tool_outcome(1)["capture_status"], "downloaded")
         self.assertEqual(self.report()["observations"][1]["model_calls"], 3)
+        for payload in payloads[2:]:
+            self.assertEqual(payload["messages"][1]["content"], history_call["content"])
+        self.assertEqual(self.journal(1)[2]["content"], history_call["content"])
+        counts = [payload for endpoint, payload, _ in self.requests if endpoint == model.TOKEN_COUNT_ENDPOINT]
+        for counted, inferred in zip(counts, payloads):
+            self.assertEqual(counted, {key: value for key, value in inferred.items() if key != "max_tokens"})
+        self.assertEqual(self.report()["model"], "claude-sonnet-5-5")
+        self.assertEqual(self.report()["model_settings"], {
+            "effort": "high", "thinking": "adaptive", "thinking_display": "omitted",
+            "max_output_tokens": 8192, "automatic_prompt_caching": True,
+        })
 
     def test_invalid_history_request_is_recoverable(self):
         self.replies = iter([tool("get_history", {"frame_ids": [999]}, "get-1"),

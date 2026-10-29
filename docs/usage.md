@@ -8,13 +8,16 @@ Run the commands from the repository root. WaitLess runs on macOS 14.1 or later
 one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. WaitLess uses its Messages API with
-**Claude Haiku 5.5** (`claude-haiku-5-5`). Each observation starts a fresh conversation
+**Claude Sonnet 5.5** (`claude-sonnet-5-5`). Each observation starts a fresh conversation
 with the instruction, current preview, session limits, history availability, and
 latest factual capture outcome. Claude can list history, retrieve earlier images,
 request a photograph, or change the preview interval in Auto mode. An ordinary end
 of turn finishes the observation without shooting and keeps the current interval.
-No explanations are required. Low effort and disabled thinking remain
-configured. Refusals, malformed responses, and API failures end monitoring.
+No explanations are required. Sonnet uses its standard API effort (**`high`**)
+with **adaptive thinking**. Thinking summaries are omitted from responses; signed
+thinking and redacted-thinking blocks are preserved unchanged within each run's
+tool conversation. The output limit is **8,192 tokens**, shared by reasoning and
+the response. Refusals, truncated or malformed responses, and API failures end monitoring.
 
 ## Camera compatibility
 
@@ -50,7 +53,7 @@ ANTHROPIC_API_KEY=your-key
 ```
 
 The current run's conversation, including any retrieved preview images, goes directly to
-`https://api.anthropic.com/v1/messages` using `claude-haiku-5-5`. A capacity check
+`https://api.anthropic.com/v1/messages` using `claude-sonnet-5-5`. A capacity check
 sends the same input to `/v1/messages/count_tokens` before each inference.
 The endpoint and model are fixed in code. Environment variables override `.env`
 for credentials; keys belong in the ignored local `.env` file.
@@ -399,7 +402,9 @@ capacity preservation. Simulated UI sessions check trace expansion, history brow
 image viewing, capture markers, and refresh recovery. These checks validate the
 workflow, not recognition accuracy on a physical scene.
 
-[Claude Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview),
+[Claude Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/overview),
+[effort](https://platform.claude.com/docs/en/build-with-claude/effort),
+[thinking](https://platform.claude.com/docs/en/build-with-claude/thinking),
 [token counting](https://platform.claude.com/docs/en/api/messages/count_tokens),
 [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
 and [tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls).

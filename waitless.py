@@ -13,7 +13,8 @@ from history import PreviewArchive, AgentJournal, capture_outcome
 from model import (API_ENDPOINT, INSTRUCTIONS, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES, MAX_INPUT_TOKENS,
                    ApiError, CapacityReached, call_model, check_capacity, count_tokens, image_content,
                    load_config, make_payload, parse_turn, text_content, validate_config, MAX_CALLS_PER_OBSERVATION,
-                   AUTO_MIN_INTERVAL, AUTO_MAX_INTERVAL, AUTO_INITIAL_INTERVAL)
+                   AUTO_MIN_INTERVAL, AUTO_MAX_INTERVAL, AUTO_INITIAL_INTERVAL,
+                   EFFORT, THINKING, MAX_OUTPUT_TOKENS)
 
 
 @dataclass(frozen=True)
@@ -362,7 +363,9 @@ def run_session(settings: SessionSettings, output: Path, *, camera_helper=DEFAUL
     report = {
         "status": "running", "phase": "connecting", "mode": "sony_usb",
         "provider": "anthropic", "model": MODEL,
-        "model_settings": {"effort": "low", "thinking": "disabled", "automatic_prompt_caching": True},
+        "model_settings": {"effort": EFFORT, "thinking": THINKING["type"],
+                           "thinking_display": THINKING["display"], "max_output_tokens": MAX_OUTPUT_TOKENS,
+                           "automatic_prompt_caching": True},
         "api_host": urlsplit(API_ENDPOINT).hostname,
         "instructions": INSTRUCTIONS, "request": settings.request,
         "source": "sony:usb", "created_at": datetime.now(timezone.utc).isoformat(),

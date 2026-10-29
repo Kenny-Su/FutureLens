@@ -36,7 +36,7 @@ class ModelTests(unittest.TestCase):
         image = Image.new("RGB", (1920, 1080), "green")
         messages = [{"role": "user", "content": [model.image_content(image)]}]
         payload = model.make_payload(messages)
-        self.assertEqual(payload["model"], "claude-haiku-5-5")
+        self.assertEqual(payload["model"], "claude-sonnet-5-5")
         self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot", "set_preview_interval"])
         self.assertEqual(payload["tool_choice"], {"type": "auto", "disable_parallel_tool_use": True})
         self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
@@ -45,8 +45,9 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(sent.size, (960, 540))
         self.assertEqual(image.size, (1920, 1080))
         self.assertNotIn("format", payload["output_config"])
-        self.assertEqual(payload["thinking"], {"type": "disabled"})
-        self.assertEqual(payload["output_config"]["effort"], "low")
+        self.assertEqual(payload["thinking"], {"type": "adaptive", "display": "omitted"})
+        self.assertEqual(payload["output_config"]["effort"], "high")
+        self.assertEqual(payload["max_tokens"], 8192)
         messages.append({"role": "assistant", "content": answer("wait")["content"]})
         self.assertEqual(len(payload["messages"]), 1)
 
@@ -94,6 +95,28 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(failure.exception.details["resource"], "images")
         self.assertEqual(len(payload["messages"][0]["content"][0]["content"]), 601)
 
+    def test_thinking_blocks_are_context_and_do_not_relax_tool_validation(self):
+        blocks = [{"type": "thinking", "thinking": "", "signature": "opaque-signature"},
+                  {"type": "redacted_thinking", "data": "opaque-encrypted-data"}]
+        for action in (answer("wait"), tool("set_preview_interval", {"seconds": 10}), answer("shoot")):
+            response = {**action, "content": blocks + action["content"]}
+            parsed = model.parse_turn(response, set())
+            self.assertEqual(parsed, action["content"][0] if action["content"] else None)
+            self.assertEqual(response["content"][:2], blocks)
+        invalid = [{"type": "thinking", "thinking": ""},
+                   {"type": "thinking", "thinking": None, "signature": "signed"},
+                   {"type": "thinking", "thinking": "", "signature": ""},
+                   {"type": "redacted_thinking", "data": None},
+                   {"type": "redacted_thinking", "data": ""}]
+        for block in invalid:
+            with self.subTest(block=block), self.assertRaises(ValueError):
+                model.parse_turn({**answer("shoot"), "content": [block, *answer("shoot")["content"]]}, set())
+        for content in (blocks + answer("shoot")["content"] * 2, blocks + tool("shoot", {"extra": 1})["content"]):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                model.parse_turn({"stop_reason": "tool_use", "content": content}, set())
+        with self.assertRaises(ValueError):
+            model.parse_turn({"stop_reason": "max_tokens", "content": blocks + answer("shoot")["content"]}, set())
+
     def test_token_count_checks_the_same_prompt_format_and_cache_settings(self):
         payload = model.make_payload([{"role": "user", "content": [model.text_content("sunrise")]}])
         with patch("model.request.build_opener") as opener:
@@ -119,7 +142,7 @@ class ModelTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"ANTHROPIC_BASE_URL": "https://example.com/gateway/v1",
                                "ANTHROPIC_MODEL": "other-model"}, clear=True)
-    def test_api_uses_only_anthropic_endpoint_and_haiku(self):
+    def test_api_uses_only_anthropic_endpoint_and_sonnet(self):
         env = self.root / ".env"
         env.write_text('ANTHROPIC_API_KEY=test-key\nANTHROPIC_WORKSPACE_ID=wrkspc_test\n'
                        'ANTHROPIC_BASE_URL=https://example.com/another-gateway/v1\n'
@@ -134,7 +157,7 @@ class ModelTests(unittest.TestCase):
         sent = opener.return_value.open.call_args.args[0]
         self.assertEqual(sent.full_url, "https://api.anthropic.com/v1/messages")
         self.assertEqual(sent.data, model.encode_payload(payload))
-        self.assertEqual(json.loads(sent.data)["model"], "claude-haiku-5-5")
+        self.assertEqual(json.loads(sent.data)["model"], "claude-sonnet-5-5")
         self.assertEqual(sent.get_header("X-api-key"), "test-key")
         self.assertEqual(sent.get_header("Anthropic-version"), model.API_VERSION)
         self.assertEqual(sent.get_header("Anthropic-workspace-id"), "wrkspc_test")
