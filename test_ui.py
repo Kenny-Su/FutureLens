@@ -31,15 +31,12 @@ class InterfaceTests(unittest.TestCase):
 
     def test_settings_validate_before_camera_or_api_work(self):
         settings = session_settings({"request": "scene"})
-        self.assertEqual(settings.preview_mode, "auto")
-        self.assertEqual(session_settings({"request": "scene", "preview_mode": "fixed", "interval": 45}).interval, 45)
-        self.assertEqual((settings.interval, settings.duration, settings.max_shots, settings.max_requests), (60, 3600, 1, 360))
-        for settings in ({"request": ""}, {"request": 1}, {"request": "x", "interval": -1},
-                         {"request": "x", "interval": True}, {"request": "x", "duration_minutes": float("nan")},
-                         {"request": "x", "duration_minutes": True}, {"request": "x", "preview_mode": "other"},
-                         {"request": "x", "duration_minutes": "10"},
-                         {"request": "x", "duration_minutes": 10**400},
-                         {"request": "x", "max_shots": 1.5}, {"request": "x", "output": "/tmp/x"},
+        self.assertEqual((settings.request, settings.max_frame_age, settings.cooldown), ("scene", 30, 5))
+        for settings in ({"request": ""}, {"request": 1}, {"request": "x", "interval": 45},
+                         {"request": "x", "preview_mode": "fixed"}, {"request": "x", "preview_mode": "auto"},
+                         {"request": "x", "duration_minutes": 60}, {"request": "x", "duration": 3600},
+                         {"request": "x", "max_shots": 1}, {"request": "x", "max_requests": 360},
+                         {"request": "x", "output": "/tmp/x"},
                          {"request": "x", "dry_run": True}, {"request": "x", "camera_helper": "other"}, []):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 self.manager.start(settings)
@@ -48,6 +45,12 @@ class InterfaceTests(unittest.TestCase):
 
     def test_ui_settings_drive_real_engine_and_saved_photo_report(self):
         clock = Clock()
+        waiting = threading.Event()
+        from waitless import write_json
+        def publish(path, report):
+            write_json(path, report)
+            if report.get("phase") == "waiting":
+                waiting.set()
         def camera(output, **kwargs):
             self.assertTrue(kwargs["enable_capture"])
             self.assertEqual(kwargs["helper"], self.helper)
@@ -56,18 +59,21 @@ class InterfaceTests(unittest.TestCase):
                 patch("waitless.load_config", return_value=ApiConfig(api_key="offline-test")), \
                 patch("waitless.count_tokens", return_value=1000), \
                 patch("waitless.call_model", return_value=answer("shoot")) as inference, \
+                patch("waitless.write_json", side_effect=publish), \
                 patch("waitless.time.monotonic", side_effect=clock.monotonic):
-            self.manager.start({"request": "Capture this scene", "duration_minutes": 2,
-                                "preview_mode": "fixed", "interval": 45, "max_shots": 1, "max_requests": 3})
+            self.manager.start({"request": "Capture this scene"})
+            self.assertTrue(waiting.wait(2))
+            self.assertEqual(self.manager.operation, "monitor")
+            self.manager.stop()
             self.manager.worker.join(2)
             self.assertFalse(self.manager.worker.is_alive())
         state = self.manager.state()
         self.assertIsNone(state["error"])
         report = state["report"]
-        self.assertEqual(report["settings"]["preview_mode"], "fixed")
-        self.assertEqual((report["settings"]["duration"], report["settings"]["interval"]), (120, 45))
+        self.assertEqual(report["current_interval_s"], 60)
+        self.assertEqual(report["settings"], {"cooldown": 5, "max_frame_age": 30})
         self.assertEqual((report["status"], report["stop_reason"], report["photos_taken"]),
-                         ("completed", "max_shots", 1))
+                         ("stopped", "user_stop", 1))
         entry = report["observations"][0]
         self.assertEqual(entry["capture_status"], "downloaded")
         self.assertEqual((entry["run_status"], entry["model_calls"]), ("finished", 1))
@@ -171,6 +177,13 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(self.request("POST", "/api/start", '{"request":"scene"}', headers)[0], 202)
             start.assert_called_once_with({"request": "scene"})
         self.assertEqual(self.request("POST", "/api/start", "invalid JSON", headers)[0], 400)
+        with patch("ui.run_session") as run:
+            for removed in ({"interval": 45}, {"preview_mode": "fixed"}, {"preview_mode": "auto"},
+                            {"duration_minutes": 60}, {"max_shots": 1}, {"max_requests": 360}):
+                with self.subTest(removed=removed):
+                    body = json.dumps({"request": "scene", **removed})
+                    self.assertEqual(self.request("POST", "/api/start", body, headers)[0], 400)
+            run.assert_not_called()
 
     def test_media_only_exposes_recorded_previews_and_successful_originals(self):
         output = self.root / "session"

@@ -2,8 +2,8 @@ import { sessionActivity } from "./activity.mjs";
 
 const $ = (id) => document.getElementById(id);
 const examples = {
-  clouds: "Take one photo when the mountain summit is clearly visible through the clouds.",
-  fog: "Take one photo when the village below is clearly visible through the fog.",
+  clouds: "Photograph the mountain whenever its summit emerges from the clouds.",
+  fog: "Photograph the village whenever it becomes visible through the fog.",
   sunrise: "Capture the mountain when warm sunrise light is visible on its summit.",
   lights: "Take one photo of the building each time another apartment goes dark.",
 };
@@ -304,13 +304,11 @@ function renderMonitor() {
   $("stop").disabled = stopping || pending || !connected;
   show("new-session", !active);
   text("active-instruction", report.request || $("instruction").value);
-  const auto = (report.settings?.preview_mode ?? $("preview-mode").value) === "auto";
-  text("interval-label", auto ? "Auto interval" : "Fixed interval");
-  text("active-interval", `${report.current_interval_s ?? report.settings?.interval ?? (auto ? 60 : Number($("interval").value))} sec`);
+  text("active-interval", `${report.current_interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (active ? "Connecting…" : "Not connected"));
   text("preview-count", entries.length);
-  text("shot-count", `${report.photos_taken || 0} / ${report.settings?.max_shots ?? $("max-shots").value}`);
-  text("call-count", `${report.api_requests || 0} / ${report.settings?.max_requests ?? $("max-requests").value}`);
+  text("shot-count", report.photos_taken || 0);
+  text("call-count", report.api_requests || 0);
   $("call-count").title = `${report.compaction_requests || 0} context summary calls included · ${report.compactions_completed || 0} completed`;
   text("session-detail", failed ? state.error || report.camera_error || `Session stopped (${report.error_type || "error"}). Check the saved logs.`
     : stopping ? "Waiting for an active operation to finish. A capture already sent to the camera may still complete."
@@ -325,17 +323,14 @@ function updateClock() {
   if (!state || !showingMonitor) return;
   const report = state.report || {};
   const active = state.operation === "monitor";
-  const duration = report.settings?.duration || Number($("duration").value) * 60;
   const start = Date.parse(report.monitoring_started_at);
   const end = Date.parse(report.ended_at);
   const elapsed = Number.isFinite(start) ? Math.max(0, ((Number.isFinite(end) ? end : Date.now()) - start) / 1000) : 0;
-  text("elapsed", `${clock(elapsed)} / ${clock(duration)}`);
-  $("duration-progress").value = Math.min(100, elapsed / duration * 100);
+  text("elapsed", clock(elapsed));
   let next = !connected ? "Connection lost · retrying…" : state.stopping ? "Finishing the current operation…" : !active ? "Session finished" : phases[report.phase] || phases.connecting;
   if (connected && active && !state.stopping && report.phase === "waiting" && report.next_observation_at) {
-    const remaining = Math.max(0, Math.min(report.next_observation_at, start / 1000 + duration) - Date.now() / 1000);
-    const endsFirst = report.next_observation_at >= start / 1000 + duration;
-    next = `${endsFirst ? "Session ends" : "Next observation"} in ${clock(Math.ceil(remaining))}`;
+    const remaining = Math.max(0, report.next_observation_at - Date.now() / 1000);
+    next = `Next observation in ${clock(Math.ceil(remaining))}`;
   }
   text("next-check", next);
 }
@@ -348,22 +343,9 @@ function render() {
   if (showingMonitor) renderMonitor();
 }
 
-function updatePreviewMode() {
-  const auto = $("preview-mode").value === "auto";
-  show("fixed-interval", !auto);
-  $("interval").disabled = auto;
-  $("timing-settings").classList.toggle("auto-timing", auto);
-  text("mode-note", auto
-    ? "Checks less often when the scene is quiet, more often as your moment approaches. Between 10 seconds and 5 minutes."
-    : "Checks at your chosen interval throughout the session.");
-}
-$("preview-mode").addEventListener("change", updatePreviewMode);
-updatePreviewMode();
-
 $("session-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
-  for (const key of ["interval", "duration_minutes", "max_shots", "max_requests"]) if (key in data) data[key] = Number(data[key]);
   if (await command("/api/start", data)) { showingMonitor = true; following = true; render(); window.scrollTo(0, 0); }
 });
 $("check-camera").addEventListener("click", () => command("/api/check"));

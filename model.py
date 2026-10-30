@@ -13,8 +13,9 @@ from PIL import Image
 
 INSTRUCTIONS = """You help a photographer capture moments that match their instruction.
 Evaluate each new preview and call shoot when the requested condition is met.
+Follow the requested repetition; avoid unintended duplicate photographs.
 Use list_history and get_history when you need earlier previews.
-In Auto mode, use set_preview_interval to check less often while the scene is stable
+Use set_preview_interval to check less often while the scene is stable
 and more often as the requested condition approaches.
 If no photograph or interval change is needed, reply "No action." without calling
 a tool. Monitoring continues automatically.
@@ -48,7 +49,7 @@ TOOLS = [
          "required": ["frame_ids"], "additionalProperties": False}},
     {"name": "shoot", "description": "Request one photograph based on the latest preview. Ends this observation even if capture is skipped. Only downloaded confirms success. Do not retry an uncertain capture.",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "set_preview_interval", "description": "Auto mode: change the interval between previews, measured from the latest preview. Use only when seconds differs from sampling.current_interval_s. The setting persists until changed. Ends this observation without taking a photograph.",
+    {"name": "set_preview_interval", "description": "Change the interval between previews, measured from the latest preview. Use only when seconds differs from sampling.current_interval_s. The setting persists until changed. Ends this observation without taking a photograph.",
      "input_schema": {"type": "object", "properties": {
          "seconds": {"type": "integer", "minimum": AUTO_MIN_INTERVAL, "maximum": AUTO_MAX_INTERVAL,
                      "description": "The new interval; must differ from the latest sampling.current_interval_s."}},
@@ -105,11 +106,7 @@ def text_content(value) -> dict:
     return {"type": "text", "text": json.dumps(value, ensure_ascii=False)}
 
 
-def tools_for_mode(preview_mode):
-    return [tool for tool in TOOLS if preview_mode == "auto" or tool["name"] != "set_preview_interval"]
-
-
-def make_payload(messages: list, *, preview_mode="auto") -> dict:
+def make_payload(messages: list) -> dict:
     return {
         "model": MODEL,
         "max_tokens": MAX_OUTPUT_TOKENS,
@@ -118,7 +115,7 @@ def make_payload(messages: list, *, preview_mode="auto") -> dict:
         "messages": list(messages),
         "cache_control": {"type": "ephemeral"},
         "output_config": {"effort": EFFORT},
-        "tools": tools_for_mode(preview_mode),
+        "tools": list(TOOLS),
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
     }
 
@@ -132,8 +129,8 @@ Later host updates supersede old budgets, timing, and capture facts. Do not call
 photographs. Return only the summary, not an explanation of your reasoning."""
 
 
-def make_compaction_payload(messages: list, *, preview_mode="auto") -> dict:
-    payload = make_payload(messages, preview_mode=preview_mode)
+def make_compaction_payload(messages: list) -> dict:
+    payload = make_payload(messages)
     payload["compaction"] = {"type": "summarize", "instructions": COMPACTION_INSTRUCTIONS}
     return payload
 
@@ -265,7 +262,7 @@ def count_tokens(payload: dict, config: ApiConfig, *, timeout=90) -> int:
     return tokens
 
 
-def parse_turn(response: dict, seen_ids: set, *, preview_mode="auto") -> dict | None:
+def parse_turn(response: dict, seen_ids: set) -> dict | None:
     """Validate the complete turn before any tool can cause a side effect."""
     if not isinstance(response, dict) or response.get("stop_reason") not in ("end_turn", "tool_use"):
         raise ValueError("Claude did not complete a turn (refused, truncated, or invalid response).")
@@ -291,7 +288,7 @@ def parse_turn(response: dict, seen_ids: set, *, preview_mode="auto") -> dict | 
             continue
         if block.get("type") != "tool_use":
             raise ValueError("Unexpected model content block")
-        if (block.get("name") not in {tool["name"] for tool in tools_for_mode(preview_mode)}
+        if (block.get("name") not in {tool["name"] for tool in TOOLS}
                 or not isinstance(block.get("id"), str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", block["id"])
                 or not isinstance(block.get("input"), dict)):

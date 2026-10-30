@@ -58,14 +58,6 @@ class ModelTests(unittest.TestCase):
         messages.append({"role": "assistant", "content": answer("wait")["content"]})
         self.assertEqual(len(payload["messages"]), 1)
 
-    def test_fixed_mode_does_not_offer_or_accept_scheduling(self):
-        payload = model.make_payload([], preview_mode="fixed")
-        self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot"])
-        response = tool("set_preview_interval", {"seconds": 10})
-        self.assertEqual(model.parse_turn(response, set())["name"], "set_preview_interval")
-        with self.assertRaises(ValueError):
-            model.parse_turn(response, set(), preview_mode="fixed")
-
     def test_only_one_valid_tool_or_end_turn_is_accepted(self):
         self.assertIsNone(model.parse_turn(answer("wait"), set()))
         self.assertEqual(model.parse_turn(answer("shoot"), set())["name"], "shoot")
@@ -172,8 +164,8 @@ class ModelTests(unittest.TestCase):
 
     def test_compaction_request_and_signed_result_protocol(self):
         messages = [{"role": "user", "content": [model.text_content("session")]}]
-        ordinary = model.make_payload(messages, preview_mode="fixed")
-        summary = model.make_compaction_payload(messages, preview_mode="fixed")
+        ordinary = model.make_payload(messages)
+        summary = model.make_compaction_payload(messages)
         self.assertEqual({k: v for k, v in summary.items() if k != "compaction"}, ordinary)
         self.assertEqual(summary["compaction"]["type"], "summarize")
         self.assertNotIn("context_management", summary)

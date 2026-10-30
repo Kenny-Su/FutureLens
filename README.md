@@ -11,7 +11,7 @@ lightweight previews and triggers a full-resolution photograph when it identifie
 a match. The goal: spend less time waiting for the shot, with fewer files to sort
 through afterward.
 
-> “Take one photo when the mountain summit is clearly visible through the clouds.”
+> “Photograph the mountain whenever its summit emerges from the clouds.”
 
 **[Get started with WaitLess →](docs/usage.md)**
 
@@ -34,10 +34,9 @@ time. WaitLess separates observation from capture:
 
 1. **Describe your moment.** Use a plain-language instruction about the subject,
    visibility, or light you want.
-2. **Let WaitLess watch.** In the default **Auto mode**, Claude chooses when to
+2. **Let WaitLess watch.** Preview timing is automatic. Claude chooses when to
    inspect the next live-view preview: less often while the mountain stays hidden,
    more often as clouds clear. It can compare earlier previews to assess change.
-   Prefer a regular rhythm? Choose **Fixed** and set your own interval.
 3. **Capture when it matches.** When Claude identifies the requested condition,
    WaitLess asks the camera to take a photograph and downloads its original files.
    You choose exposure and image format on the camera.
@@ -59,9 +58,10 @@ time. WaitLess separates observation from capture:
 - **Keep the photograph you came for.** Captures are separate camera exposures,
   with JPEG, HEIF, RAW, or paired files according to the camera's recording and
   transfer settings.
-- **Choose how much to delegate.** Set observation frequency, session duration,
-  photo limits, and an AI-call budget. Review previews and capture outcomes in the
-  local browser interface while monitoring continues.
+- **Keep watching as long as you need.** Monitoring continues until you stop it,
+  with no session time, photograph, or AI-call budget. Your instruction determines
+  whether to capture once or photograph repeated events. Review previews and
+  capture outcomes in the local browser interface while monitoring continues.
 - **Spend attention where the scene is changing.** Auto mode lets the model space
   out checks during quiet periods and bring them closer together as your moment
   approaches. It keeps the current interval until a change is needed; interval

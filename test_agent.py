@@ -21,7 +21,7 @@ class SessionAgentTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.agent = SessionAgent(self.root, "auto")
+        self.agent = SessionAgent(self.root)
         self.archive = PreviewArchive(self.root, 100)
 
     def observe(self, frame_id):

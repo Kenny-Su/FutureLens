@@ -9,9 +9,9 @@ one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. WaitLess uses its Messages API with
 **Claude Sonnet 5.5** (`claude-sonnet-5-5`). Each session has one persistent agent
-conversation. Every observation adds a new preview, session limits, history availability,
+conversation. Every observation adds a new preview, freshness and cooldown state, history availability,
 and latest factual capture outcome. Claude can list history, retrieve earlier images,
-request a photograph, or change the preview interval in Auto mode. An ordinary end
+request a photograph, or change the automatic preview interval. An ordinary end
 of turn finishes the observation without shooting and keeps the current interval.
 When no action is needed, Claude is instructed to reply **No action.** without a tool
 call; the host schedules the next preview automatically. Repeating the current interval
@@ -120,12 +120,12 @@ or `--port 8766` to choose another port. Keep the terminal running. This command
 only launches the interface; instructions, settings, connection checks, and monitoring
 are controlled in the browser.
 
-1. Enter an instruction, or choose an example. **Preview timing** defaults to
-   **Auto**: Claude chooses intervals between **10 seconds and 5 minutes**. Choose
-   **Fixed** to set an interval in seconds (default 60). Set duration in **minutes**
-   and photo limit; defaults are 60 minutes and one photo.
-   Under **AI budget**, **Maximum AI calls** defaults to 360.
-   Each observation can use up to six calls; the header counts calls and previews separately.
+1. Enter an instruction, or choose an example. **Preview timing** is automatic:
+   Claude chooses intervals between **10 seconds and 5 minutes**.
+   There are no session duration, photograph-count, or AI-call budgets. Describe
+   whether to capture once or repeat photographs when the condition occurs again.
+   Monitoring continues until you press **Stop session**. The header shows elapsed
+   time and cumulative preview, photograph, and AI-call counts.
 2. Optionally **Check connection** to detect the camera, assess capabilities, and
    see a preview. This does not call Claude, enable capture, or take a photo.
    The connection is released afterward and checked again when monitoring starts.
@@ -134,7 +134,7 @@ are controlled in the browser.
    order. Timestamps are relative to the start of the session. Progress updates
    revise the same action instead of creating duplicate entries; a no-photo decision
    reads **Keep watching**. The stream shows sampled observations, not continuous video
-   or internal model reasoning. In Auto mode, interval changes such as **300 → 10 sec**
+   or internal model reasoning. Interval changes such as **300 → 10 sec**
    appear as independent actions, and the header shows the current interval.
    A repeated setting appears as **Preview interval unchanged**, not as a change.
 4. Open any thumbnail in the image viewer. History retrieval actions include their
@@ -166,18 +166,18 @@ The interface itself loads no external fonts, scripts, or analytics.
 
 ## The observation loop
 
-The first observation happens immediately after camera setup. **Auto** is the
-default preview timing mode; **Fixed** keeps a regular schedule.
+The first observation happens immediately after camera setup. Preview timing is
+always automatic; there is no mode selector or manual interval setting.
 
 1. Retrieve a fresh camera preview and save it locally.
 2. Append to the session's conversation with the instruction, timestamped preview,
-   session limits, available history, latest capture facts, preview timing mode,
+   freshness and cooldown state, available history, latest capture facts,
    interval bounds, and the current interval.
 3. Check capacity, then call Claude. A response may contain one tool call or end
    the observation without a photograph.
 4. Return history tool results to Claude and continue within the same run. A `shoot`
    call uses the capture safeguards, records its actual outcome, and automatically
-   finishes the observation, with no extra inference afterward. In Auto mode, a
+   finishes the observation, with no extra inference afterward. A
    successful `set_preview_interval` call also finishes the observation without
    another inference or a photograph.
 5. Compact older context if needed, then wait for the next scheduled observation.
@@ -199,12 +199,7 @@ Auto's interval is measured from the current preview's host timestamp, including
 retrieval and processing time. If processing outlasts that interval, the next
 preview is taken as soon as the current observation finishes. Observations never
 overlap and missed previews are not replayed. The countdown reflects the next
-scheduled observation or the session deadline, whichever comes first.
-
-**Fixed mode:** observations follow **Observe every** (default **60 seconds**) on
-the session's original schedule. Processing does not add drift. An operation that
-overruns a scheduled slot skips it; there are no catch-up bursts. The scheduling
-tool is neither offered nor accepted in Fixed mode.
+scheduled observation.
 
 Everything runs sequentially: there is one evaluation or compaction in flight and no background
 preview sampler or scene-change detector. During a long wait, a new event cannot
@@ -213,21 +208,22 @@ but may miss a brief clearing between them. Field performance and net resource
 savings remain unmeasured. Every sampled preview is retained; the program does not
 save every frame from the camera's live stream.
 
-**Watch for** defaults to **60 minutes**, measured after connection/setup.
-**Maximum AI calls** defaults to **360** across the session, including compaction
-requests (successful or failed). A run can make up to
-**six** inference calls, including its initial evaluation. Reaching six without a
+Sessions have no time, photograph-count, or total AI-call limit. Photographs do not
+end monitoring; follow-up observations include the capture outcome so Claude can
+follow the user's requested repetition. **Stop session** ends monitoring. Camera
+or inference errors and hard context capacity limits still stop a session.
+
+Each observation can make up to **six** inference calls, including its initial evaluation. Reaching six without a
 completed decision displays **Run limit reached**, and monitoring continues at the
-next scheduled observation. Compaction does not consume this six-evaluation allowance,
-and is skipped when fewer than two AI calls remain, reserving a call for the next
-observation. Using the session budget ends monitoring. Token-count
-checks are recorded separately and consume neither budget. **Photo limit** defaults
-to **one** confirmed download; increase it for a sequence.
+next scheduled observation. Compaction does not consume this six-evaluation allowance.
+The AI-call count includes scene evaluations and compaction requests (successful or
+failed). Token-count requests are recorded separately. Each API request has a
+90-second timeout.
 
 The preview expires after **30 seconds**, including history lookup and API time.
 No further inference or capture starts for that preview. An in-flight request may
-finish, but cannot authorize an expired capture. The same applies to Stop and the
-session deadline. An SDK operation already in progress may take time to finish.
+finish, but cannot authorize an expired capture. Stop also prevents a subsequent
+capture. An SDK operation already in progress may take time to finish.
 
 Use **Check connection** for a local preview without an API key, inference call,
 shutter command, or changes to capture settings.
@@ -239,7 +235,7 @@ shutter command, or changes to capture settings.
 | `list_history` | Optional `start_s`, `end_s`, `cursor`, `limit` | Earlier previews, newest first: IDs, timestamps, capture facts, and `next_cursor`. Defaults to 20, maximum 50. Time filters are inclusive seconds since monitoring began. |
 | `get_history` | `frame_ids`: one to eight distinct earlier IDs | Actual images, timestamps, and factual capture outcomes. |
 | `shoot` | No arguments | Downloaded, skipped, or failed capture outcome; always finishes the observation. |
-| `set_preview_interval` | Integer `seconds` (10–300); no other arguments | Auto only. Changes the persistent preview interval and finishes the observation without a photograph or another inference. The interval stays in effect until changed. Invalid arguments return a tool error the model can correct within its remaining calls. |
+| `set_preview_interval` | Integer `seconds` (10–300); no other arguments | Changes the persistent preview interval and finishes the observation without a photograph or another inference. The interval stays in effect until changed. Invalid arguments return a tool error the model can correct within its remaining calls. |
 
 History tools can access only earlier previews in the current session. They accept
 IDs, never arbitrary file paths. Invalid history requests produce a tool error the
@@ -247,15 +243,19 @@ agent can correct within its remaining calls. There is no mandatory history look
 the agent chooses when earlier images help and can use images already in context.
 A successful download, its preview ID, and the latest capture outcome are included
 in subsequent observations as factual context. Follow-up evaluations receive fresh
-time, freshness, cooldown, and call-budget information inside the preceding tool result.
+freshness, cooldown, and remaining calls for that observation inside the preceding tool result.
 Tool IDs are deduplicated across the entire session, including across compaction.
 
 Interval changes are also saved in each run's transcript and activity trace.
-`results.json` records `settings.preview_mode`, `current_interval_s`, and the latest
+`results.json` records `current_interval_s` and the latest
 `last_interval_change` (previous seconds, new seconds, and triggering frame ID);
 each observation includes `next_preview_interval_s`. Refreshing the interface restores these
-values from the running server's report. Stop, session duration, preview freshness,
-and AI-call budgets still take precedence over scheduling decisions.
+values from the running server's report. Stop and preview freshness still take
+precedence over scheduling decisions.
+The session start endpoint accepts only `request`. Former settings such as
+`preview_mode`, `interval`, `duration_minutes`, `max_shots`, and `max_requests` are
+rejected before camera or API work starts. Existing output folders
+are kept as recorded.
 
 Every observation's preview is saved under `previews/` at its received resolution
 as a JPEG. `previews/index.jsonl` records IDs, session timestamps, SDK frame numbers,
@@ -288,11 +288,10 @@ are passed back unchanged; subsequent compaction includes the previous summary.
 An empty ordinary end turn is recorded as no action without adding an empty
 assistant message to later requests.
 
-Compaction runs **before fetching the next preview**, with a timeout bounded by
-90 seconds and the remaining session duration. It can delay the next observation;
-Auto samples when ready, while Fixed skips missed slots on its original schedule.
-The new preview gets its own freshness window. Stop and the session deadline still
-take precedence, including when a compaction request is already in flight.
+Compaction runs **before fetching the next preview**, with a 90-second request timeout.
+It can delay the next observation. If the interval has elapsed, the next preview is
+taken as soon as compaction finishes. The new preview gets its own freshness window.
+Stop takes precedence, including when a compaction request is already in flight.
 
 If compaction fails or produces no valid summary, the original conversation stays
 intact. The UI records the failure and monitoring continues. A new attempt requires
@@ -347,14 +346,14 @@ The report adds `context_revision`, `compaction_requests`, `compactions_complete
 `compaction_settings`, and the latest `compaction` status, duration, and safe usage
 or error metadata. `api_requests` includes both evaluations and summary calls;
 each observation's `model_calls` counts only its evaluations. The UI shows context
-organization in the activity trace and includes summary calls in the AI budget.
+organization in the activity trace and includes summary calls in the AI-call count.
 Summary text and thinking blocks remain in local transcripts, outside the UI state response.
 
 ## Capture behavior
 
 A `shoot` tool call requests one photo of the newest observation. The application
-rejects it when the monitoring duration has expired, the preview is older than
-**30 seconds**, or the capture cooldown is active.
+rejects it when Stop has been requested, the preview is older than **30 seconds**,
+or the capture cooldown is active.
 Freshness includes preview retrieval, token counting, and inference time. It is
 checked again immediately before shutter preparation, and the remaining allowance
 is passed to the helper so autofocus cannot silently use up the deadline.
@@ -446,7 +445,7 @@ and notarized macOS app installer.
 
 Our native bridge uses Sony's SDK headers and libraries directly. It provides the
 persistent internal process protocol, USB selection, capability checks, and capture
-safeguards. Claude decisions, timing, and capture limits remain in Python.
+safeguards. Claude decisions, timing, and capture checks remain in Python.
 
 - `model.py`: fixed Anthropic transport, native tool payloads, strict turn validation, and capacity checks.
 - `agent.py`: session conversation, thinking preservation, signed compaction boundaries, and append-only context log.
@@ -460,7 +459,7 @@ safeguards. Claude decisions, timing, and capture limits remain in Python.
 - `test_model.py`: tool-call validation, capacity boundaries, and fixed-endpoint transport checks.
 - `test_agent.py`: retained context, compaction signatures, repeated compaction, and journal reconstruction.
 - `test_history.py`: preview and conversation persistence with local image references.
-- `test_camera.py`: agent replay, call budgets, scheduling, capacity stops, capture limits, and cleanup.
+- `test_camera.py`: agent replay, per-observation call limits, scheduling, capacity stops, continuous capture, and cleanup.
 - `test_ui.py`: settings validation, exclusive camera ownership, local HTTP controls, and media access.
 - `test_runtime.py`: bundled library loading, portable paths, and package contents.
 - `test_native.py` / `native/test_camera_capabilities.cpp`: offline USB-selection and
@@ -471,7 +470,7 @@ safeguards. Claude decisions, timing, and capture limits remain in Python.
 ```
 
 Offline replays exercise session conversations, native compaction, paginated history, retrieved images,
-changing and unchanged scenes, capture confirmation, budgets, Stop, timing, and
+changing and unchanged scenes, capture confirmation, observation limits, Stop, timing, and
 capacity preservation. Simulated UI sessions check the unified activity stream, history browsing,
 image viewing, capture markers, and refresh recovery. These checks validate the
 workflow, not recognition accuracy on a physical scene.

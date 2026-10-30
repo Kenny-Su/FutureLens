@@ -15,8 +15,8 @@ COMPACTION_RETRY_SECONDS = 60
 
 
 class SessionAgent:
-    def __init__(self, output, preview_mode):
-        self.output, self.preview_mode = output, preview_mode
+    def __init__(self, output):
+        self.output = output
         self.messages, self.seen_ids, self.boundaries = [], set(), []
         self.revision = 0
         self.estimated_tokens = 0
@@ -39,10 +39,10 @@ class SessionAgent:
         self.messages.append(message)
 
     def payload(self):
-        return make_payload(self.messages, preview_mode=self.preview_mode)
+        return make_payload(self.messages)
 
     def accept_response(self, response, observation_id, input_tokens):
-        call = parse_turn(response, self.seen_ids, preview_mode=self.preview_mode)
+        call = parse_turn(response, self.seen_ids)
         # This is exactly a previously sent request's prefix. Its last user message
         # has resolved all preceding tool calls; the kept tail starts with this reply.
         self.record("request", observation_id=observation_id, message_count=len(self.messages),
@@ -70,7 +70,7 @@ class SessionAgent:
         if not candidates:
             return None
         cut = max(candidates)
-        return cut, make_compaction_payload(self.messages[:cut], preview_mode=self.preview_mode)
+        return cut, make_compaction_payload(self.messages[:cut])
 
     def apply_compaction(self, response, cut):
         summary = deepcopy(parse_compaction(response))

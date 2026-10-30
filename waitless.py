@@ -22,20 +22,13 @@ from model import (API_ENDPOINT, INSTRUCTIONS, MODEL, MAX_IMAGES, MAX_REQUEST_BY
 @dataclass(frozen=True)
 class SessionSettings:
     request: str
-    duration: float = 3600
-    interval: float = 60
-    max_requests: int = 360
-    max_shots: int = 1
     max_frame_age: float = 30
     cooldown: float = 5
-    preview_mode: str = "auto"
 
     def __post_init__(self):
-        if self.preview_mode not in ("auto", "fixed"):
-            raise ValueError("Preview mode must be auto or fixed.")
         if not isinstance(self.request, str) or not self.request.strip() or len(self.request) > 8000:
             raise ValueError("Enter an instruction (up to 8,000 characters).")
-        for name in ("duration", "interval", "max_frame_age", "cooldown"):
+        for name in ("max_frame_age", "cooldown"):
             value = getattr(self, name)
             try:
                 valid = type(value) in (int, float) and math.isfinite(value)
@@ -44,9 +37,6 @@ class SessionSettings:
             if not valid or (value < 0 if name == "cooldown" else value <= 0):
                 qualifier = "non-negative" if name == "cooldown" else "positive"
                 raise ValueError(f"{name.replace('_', ' ').capitalize()} must be a finite, {qualifier} number.")
-        for name in ("max_shots", "max_requests"):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
-                raise ValueError("Photo and AI call limits must be positive whole numbers.")
 
 
 def write_json(path: Path, value: object) -> None:
@@ -70,7 +60,7 @@ class Monitor:
         self.report, self.stop_event = report, stop_event
         self.last_capture = -math.inf
         self.latest_capture_outcome = self.last_downloaded_capture = None
-        self.agent = SessionAgent(output, settings.preview_mode)
+        self.agent = SessionAgent(output)
 
     def publish(self):
         write_json(self.output / "results.json", self.report)
@@ -78,22 +68,17 @@ class Monitor:
     def expired(self, preview):
         if self.stop_event is not None and self.stop_event.is_set():
             return "user_stop"
-        if time.monotonic() >= self.deadline:
-            return "duration"
         if time.monotonic() - preview.received_at >= self.settings.max_frame_age:
             return "stale_preview"
         return None
 
     def shoot(self, preview, entry, journal, call_id):
         reason = self.expired(preview)
-        statuses = {"user_stop": "skipped_user_stop", "duration": "skipped_duration_expired",
-                    "stale_preview": "skipped_stale_frame"}
+        statuses = {"user_stop": "skipped_user_stop", "stale_preview": "skipped_stale_frame"}
         if reason:
             entry["capture_status"] = statuses[reason]
         elif time.monotonic() - self.last_capture < self.settings.cooldown:
             entry["capture_status"] = "skipped_cooldown"
-        elif self.report["photos_taken"] >= self.settings.max_shots:
-            entry["capture_status"] = "skipped_photo_limit"
         else:
             entry.update(capture_status="requested", capture_id=self.report["photos_taken"])
             self.report["phase"] = "capturing"
@@ -105,7 +90,7 @@ class Monitor:
 
             # Writing the request and camera preparation can consume the remaining allowance.
             reason = self.expired(preview)
-            remaining = min(self.deadline, preview.received_at + self.settings.max_frame_age) - time.monotonic()
+            remaining = preview.received_at + self.settings.max_frame_age - time.monotonic()
             if reason == "user_stop":
                 entry["capture_status"] = "skipped_user_stop"
             elif reason or remaining <= 0:
@@ -128,9 +113,7 @@ class Monitor:
 
     def current_state(self, preview, model_calls):
         now = time.monotonic()
-        return {"remaining_seconds": max(0, self.deadline - now),
-                "photos_taken": self.report["photos_taken"], "photo_limit": self.settings.max_shots,
-                "model_calls_remaining": self.settings.max_requests - self.report["api_requests"],
+        return {"photos_taken": self.report["photos_taken"],
                 "calls_per_observation": MAX_CALLS_PER_OBSERVATION,
                 "observation_calls_remaining": MAX_CALLS_PER_OBSERVATION - model_calls,
                 "preview_freshness_s": self.settings.max_frame_age,
@@ -152,10 +135,9 @@ class Monitor:
                    "session": self.current_state(preview, 0),
                    "history": {"count": preview.id, "first_frame_id": 0 if preview.id else None,
                                "latest_frame_id": preview.id - 1 if preview.id else None},
-                   "sampling": {"mode": self.settings.preview_mode,
-                                "current_interval_s": self.report["current_interval_s"],
-                                "min_interval_s": AUTO_MIN_INTERVAL if self.settings.preview_mode == "auto" else self.settings.interval,
-                                "max_interval_s": AUTO_MAX_INTERVAL if self.settings.preview_mode == "auto" else self.settings.interval},
+                   "sampling": {"current_interval_s": self.report["current_interval_s"],
+                                "min_interval_s": AUTO_MIN_INTERVAL,
+                                "max_interval_s": AUTO_MAX_INTERVAL},
                    "latest_capture_outcome": self.latest_capture_outcome,
                    "last_downloaded_capture": self.last_downloaded_capture}
         message = {"role": "user", "content": [text_content(initial), image_content(preview.image())]}
@@ -165,9 +147,6 @@ class Monitor:
             for turn in range(1, MAX_CALLS_PER_OBSERVATION + 1):
                 outcome = self.expired(preview)
                 if outcome:
-                    break
-                if self.report["api_requests"] >= self.settings.max_requests:
-                    outcome = "session_budget"
                     break
                 action_id = f"model:{turn}"
                 active = ("model", action_id)
@@ -179,8 +158,7 @@ class Monitor:
                 if outcome:
                     break
                 self.report["token_count_requests"] += 1
-                metrics["input_tokens"] = count_tokens(payload, self.config,
-                                                       timeout=min(90, self.deadline - time.monotonic()))
+                metrics["input_tokens"] = count_tokens(payload, self.config, timeout=90)
                 entry.update(metrics)
                 outcome = self.expired(preview)
                 if outcome:
@@ -200,7 +178,7 @@ class Monitor:
                     entry["model_calls"] -= 1
                     break
                 before = time.monotonic()
-                response = call_model(payload, self.config, timeout=min(90, self.deadline - before))
+                response = call_model(payload, self.config, timeout=90)
                 call = self.agent.accept_response(response, preview.id, metrics["input_tokens"])
                 message = {"role": "assistant", "content": response["content"]}
                 journal.message(message)
@@ -284,7 +262,7 @@ class Monitor:
                 if outcome:
                     break
             else:
-                outcome = "session_budget" if self.report["api_requests"] >= self.settings.max_requests else "run_limit"
+                outcome = "run_limit"
         except CapacityReached as exc:
             outcome = "capacity_reached"
             self.report.update(status="capacity_reached", stop_reason="capacity_reached", capacity=exc.details)
@@ -313,9 +291,6 @@ class Monitor:
                           model_calls=entry["model_calls"], capture_outcome=capture_outcome(entry))
 
     def compact_between_observations(self, preview, entry):
-        if (time.monotonic() >= self.deadline
-                or self.settings.max_requests - self.report["api_requests"] < 2):
-            return
         check_stop(self.stop_event)
         candidate = self.agent.compaction_candidate(preview.id, time.monotonic())
         if candidate is None:
@@ -344,29 +319,16 @@ class Monitor:
         reserved = dispatched = False
         try:
             check_stop(self.stop_event)
-            if time.monotonic() >= self.deadline:
-                event("skipped")
-                return
             self.report["token_count_requests"] += 1
-            count_tokens(payload, self.config, timeout=min(90, self.deadline - time.monotonic()))
+            count_tokens(payload, self.config, timeout=90)
             check_stop(self.stop_event)
-            if time.monotonic() >= self.deadline:
-                event("skipped")
-                return
             self.report["api_requests"] += 1
             self.report["compaction_requests"] += 1
             reserved = True
             event("started")
             check_stop(self.stop_event)
-            remaining = self.deadline - time.monotonic()
-            if remaining <= 0:
-                self.report["api_requests"] -= 1
-                self.report["compaction_requests"] -= 1
-                reserved = False
-                event("skipped")
-                return
             dispatched = True
-            response = call_model(payload, self.config, timeout=min(90, remaining))
+            response = call_model(payload, self.config, timeout=90)
             info["usage"] = response_usage(response) if isinstance(response, dict) else {}
             parse_compaction(response)
         except (SessionStopped, CapacityReached):
@@ -395,25 +357,19 @@ class Monitor:
                                monitoring_started_at=datetime.now(timezone.utc).isoformat())
             self.publish()
             start = time.monotonic()
-            self.deadline = start + self.settings.duration
             next_sample = start
             self.archive = PreviewArchive(self.output, start)
-            self.report.update(stop_reason="duration", preview_index="previews/index.jsonl")
-            while time.monotonic() < self.deadline:
+            self.report.update(preview_index="previews/index.jsonl")
+            while True:
                 check_stop(self.stop_event)
-                if self.report["api_requests"] >= self.settings.max_requests:
-                    self.report["stop_reason"] = "max_requests"
-                    break
                 now = time.monotonic()
                 if now < next_sample:
-                    delay = min(next_sample - now, self.deadline - now)
+                    delay = next_sample - now
                     if self.stop_event is None:
                         time.sleep(delay)
                     else:
                         self.stop_event.wait(delay)
                 check_stop(self.stop_event)
-                if time.monotonic() >= self.deadline:
-                    break
                 self.report.update(phase="observing", next_observation_at=None)
                 self.publish()
                 preview = self.archive.append(self.camera.latest_frame())
@@ -433,27 +389,15 @@ class Monitor:
                 check_stop(self.stop_event)
                 if self.report["status"] == "capacity_reached":
                     break
-                if self.report["photos_taken"] >= self.settings.max_shots:
-                    self.report["stop_reason"] = "max_shots"
-                    break
                 try:
                     self.compact_between_observations(preview, entry)
                 except CapacityReached as exc:
                     self.report.update(status="capacity_reached", stop_reason="capacity_reached", capacity=exc.details)
                     break
                 check_stop(self.stop_event)
-                if self.settings.preview_mode == "auto":
-                    next_sample = max(time.monotonic(), preview.received_at + entry["next_preview_interval_s"])
-                else:
-                    next_sample += self.settings.interval
-                    if next_sample < time.monotonic():
-                        next_sample = start + math.ceil((time.monotonic() - start) / self.settings.interval) * self.settings.interval
+                next_sample = max(time.monotonic(), preview.received_at + entry["next_preview_interval_s"])
                 self.report.update(phase="waiting", next_observation_at=time.time() + max(0, next_sample - time.monotonic()))
                 self.publish()
-        if not self.report["previews_saved"]:
-            raise RuntimeError("No live-view frames were received within the monitoring duration")
-        if self.report["status"] != "capacity_reached":
-            self.report["status"] = "completed"
         self.publish()
         return self.output
 
@@ -474,9 +418,9 @@ def run_session(settings: SessionSettings, output: Path, *, camera_helper=DEFAUL
         "instructions": INSTRUCTIONS, "request": settings.request,
         "source": "sony:usb", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
-                     ("duration", "interval", "preview_mode", "max_requests", "cooldown", "max_frame_age", "max_shots")},
+                     ("cooldown", "max_frame_age")},
         "auto_interval_bounds_s": {"min": AUTO_MIN_INTERVAL, "max": AUTO_MAX_INTERVAL, "initial": AUTO_INITIAL_INTERVAL},
-        "current_interval_s": AUTO_INITIAL_INTERVAL if settings.preview_mode == "auto" else settings.interval,
+        "current_interval_s": AUTO_INITIAL_INTERVAL,
         "last_interval_change": None,
         "capacity_limits": {"images": MAX_IMAGES, "request_bytes": MAX_REQUEST_BYTES, "input_tokens": MAX_INPUT_TOKENS},
         "calls_per_observation": MAX_CALLS_PER_OBSERVATION,
