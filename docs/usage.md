@@ -8,16 +8,23 @@ Run the commands from the repository root. WaitLess runs on macOS 14.1 or later
 one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. WaitLess uses its Messages API with
-**Claude Sonnet 5.5** (`claude-sonnet-5-5`). Each observation starts a fresh conversation
-with the instruction, current preview, session limits, history availability, and
-latest factual capture outcome. Claude can list history, retrieve earlier images,
+**Claude Sonnet 5.5** (`claude-sonnet-5-5`). Each session has one persistent agent
+conversation. Every observation adds a new preview, session limits, history availability,
+and latest factual capture outcome. Claude can list history, retrieve earlier images,
 request a photograph, or change the preview interval in Auto mode. An ordinary end
 of turn finishes the observation without shooting and keeps the current interval.
-No explanations are required. Sonnet uses its standard API effort (**`high`**)
+When no action is needed, Claude is instructed to reply **No action.** without a tool
+call; the host schedules the next preview automatically. Repeating the current interval
+is recorded as unchanged, preserves the last actual interval change, and ends the
+observation without another inference. No explanations are required.
+Sonnet uses its standard API effort (**`high`**)
 with **adaptive thinking**. Thinking summaries are omitted from responses; signed
-thinking and redacted-thinking blocks are preserved unchanged within each run's
-tool conversation. The output limit is **8,192 tokens**, shared by reasoning and
-the response. Refusals, truncated or malformed responses, and API failures end monitoring.
+thinking and redacted-thinking blocks are preserved unchanged across observations.
+Older context is summarized using Anthropic's native on-demand compaction; recent
+observations retain their original images, thinking, and tool results. The output
+limit is **8,192 tokens**, shared by reasoning and the response. Ordinary inference
+refusals, truncated or malformed responses, and API failures end monitoring.
+Compaction failures preserve the old context and allow observations to continue.
 
 ## Camera compatibility
 
@@ -52,15 +59,17 @@ Dependencies stay in `.venv`. Configure the project `.env`:
 ANTHROPIC_API_KEY=your-key
 ```
 
-The current run's conversation, including any retrieved preview images, goes directly to
+The active session conversation, including preview images and any summary, goes directly to
 `https://api.anthropic.com/v1/messages` using `claude-sonnet-5-5`. A capacity check
-sends the same input to `/v1/messages/count_tokens` before each inference.
+sends the same input to `/v1/messages/count_tokens` before each inference or compaction.
 The endpoint and model are fixed in code. Environment variables override `.env`
 for credentials; keys belong in the ignored local `.env` file.
 If your key requires an explicit workspace, also set `ANTHROPIC_WORKSPACE_ID`.
 
-The HTTP client uses API version `2026-10-21`. No automatic retries, alternate endpoints,
-or model fallbacks are used. Images sent to the API are resized to a maximum edge of
+The HTTP client uses API version `2026-10-21` and the `compact-2026-09-04` beta header.
+Ordinary inference and token-count failures are not retried. Failed compaction can
+be attempted again after at least 60 seconds and a new completed observation.
+There are no alternate endpoints or model fallbacks. Images sent to the API are resized to a maximum edge of
 960 pixels; saved photos are the camera's separate captures. API errors retain the HTTP status,
 known error type, numeric retry delay, and request ID when available. Free-form provider
 error text, credentials, and encoded images are not logged.
@@ -120,19 +129,22 @@ are controlled in the browser.
 2. Optionally **Check connection** to detect the camera, assess capabilities, and
    see a preview. This does not call Claude, enable capture, or take a photo.
    The connection is released afterward and checked again when monitoring starts.
-3. **Start monitoring** opens a horizontal timeline. Each saved preview creates one
-   card with its run's vertical activity trace beneath the image. The latest card
-   expands automatically; older cards can be independently expanded or collapsed.
-   The timeline shows sampled observations, not a continuous video feed.
-   In Auto mode, the header shows the current interval. Expand a preview card to
-   see any interval change, such as **300 → 10 sec**, alongside other activity.
-4. Open any thumbnail in the image viewer. History retrievals appear inside the
-   requesting card, with thumbnails and links back to their original observations.
-   Scrolling back preserves your position while monitoring continues. **Return to
-   latest** resumes following new previews. Cards blocked before inference show
-   **Not sent**; run limits, expired previews, and failures have distinct outcomes.
-5. Green photo markers indicate confirmed downloads, linked to their triggering
-   preview. Select one to download its original JPEG, HEIF, RAW, or paired files.
+3. **Start monitoring** opens a vertical **Session activity** stream. Previews,
+   scene evaluations, tool calls, and context compaction appear as peers in time
+   order. Timestamps are relative to the start of the session. Progress updates
+   revise the same action instead of creating duplicate entries; a no-photo decision
+   reads **Keep watching**. The stream shows sampled observations, not continuous video
+   or internal model reasoning. In Auto mode, interval changes such as **300 → 10 sec**
+   appear as independent actions, and the header shows the current interval.
+   A repeated setting appears as **Preview interval unchanged**, not as a change.
+4. Open any thumbnail in the image viewer. History retrieval actions include their
+   returned thumbnails and links back to the original previews. Scrolling upward
+   preserves your position while monitoring continues. **Return to latest** resumes
+   following new previews and actions. Evaluation limits, expired previews, and
+   failures have distinct outcomes.
+5. A photograph's preparation, shutter, and download statuses update its tool-call
+   entry. **Photo saved** and green preview markers require a confirmed download.
+   Download links on the photo action provide the original JPEG, HEIF, RAW, or paired files.
    A model's `shoot` request or an unconfirmed shutter is not marked as a saved photo.
 6. **Stop session** interrupts the interval wait and prevents subsequent operations.
    An API or SDK operation already in progress finishes first. A capture already
@@ -158,7 +170,7 @@ The first observation happens immediately after camera setup. **Auto** is the
 default preview timing mode; **Fixed** keeps a regular schedule.
 
 1. Retrieve a fresh camera preview and save it locally.
-2. Start a fresh agent conversation with the instruction, timestamped preview,
+2. Append to the session's conversation with the instruction, timestamped preview,
    session limits, available history, latest capture facts, preview timing mode,
    interval bounds, and the current interval.
 3. Check capacity, then call Claude. A response may contain one tool call or end
@@ -168,13 +180,15 @@ default preview timing mode; **Fixed** keeps a regular schedule.
    finishes the observation, with no extra inference afterward. In Auto mode, a
    successful `set_preview_interval` call also finishes the observation without
    another inference or a photograph.
-5. Wait for the next scheduled observation, then start another fresh run.
+5. Compact older context if needed, then wait for the next scheduled observation.
+   The next preview continues the same conversation, including the previous
+   observation's final capture or interval-change result.
 
 **Auto mode:** each new session starts at **60 seconds**. Claude calls
 `set_preview_interval(seconds)` only when a different interval is needed, within
 the **10 to 300 second** bounds. No reason is requested. The guidance is to wait longer when history shows a
 stable scene far from the target, and check sooner as the desired moment approaches.
-Claude can retrieve earlier images to assess change. The current interval is
+Claude can compare images already in context or retrieve missing images to assess change. The current interval is
 included in every observation's context and persists until a valid tool call
 changes it. Plain end turns, photographs, rejected changes, expired previews, and
 run limits all keep the current interval. A successful change takes effect for the
@@ -192,7 +206,7 @@ the session's original schedule. Processing does not add drift. An operation tha
 overruns a scheduled slot skips it; there are no catch-up bursts. The scheduling
 tool is neither offered nor accepted in Fixed mode.
 
-Everything runs sequentially: there is one inference in flight and no background
+Everything runs sequentially: there is one evaluation or compaction in flight and no background
 preview sampler or scene-change detector. During a long wait, a new event cannot
 be detected until the next preview. Auto can reduce checks during quiet periods,
 but may miss a brief clearing between them. Field performance and net resource
@@ -200,10 +214,13 @@ savings remain unmeasured. Every sampled preview is retained; the program does n
 save every frame from the camera's live stream.
 
 **Watch for** defaults to **60 minutes**, measured after connection/setup.
-**Maximum AI calls** defaults to **360** across the session. A run can make up to
+**Maximum AI calls** defaults to **360** across the session, including compaction
+requests (successful or failed). A run can make up to
 **six** inference calls, including its initial evaluation. Reaching six without a
 completed decision displays **Run limit reached**, and monitoring continues at the
-next scheduled observation. Using the session budget ends monitoring. Token-count
+next scheduled observation. Compaction does not consume this six-evaluation allowance,
+and is skipped when fewer than two AI calls remain, reserving a call for the next
+observation. Using the session budget ends monitoring. Token-count
 checks are recorded separately and consume neither budget. **Photo limit** defaults
 to **one** confirmed download; increase it for a sequence.
 
@@ -227,8 +244,11 @@ shutter command, or changes to capture settings.
 History tools can access only earlier previews in the current session. They accept
 IDs, never arbitrary file paths. Invalid history requests produce a tool error the
 agent can correct within its remaining calls. There is no mandatory history lookup;
-the agent chooses when earlier images help. A successful download, its preview ID,
-and the latest capture outcome are included in subsequent runs as factual context.
+the agent chooses when earlier images help and can use images already in context.
+A successful download, its preview ID, and the latest capture outcome are included
+in subsequent observations as factual context. Follow-up evaluations receive fresh
+time, freshness, cooldown, and call-budget information inside the preceding tool result.
+Tool IDs are deduplicated across the entire session, including across compaction.
 
 Interval changes are also saved in each run's transcript and activity trace.
 `results.json` records `settings.preview_mode`, `current_interval_s`, and the latest
@@ -240,11 +260,51 @@ and AI-call budgets still take precedence over scheduling decisions.
 Every observation's preview is saved under `previews/` at its received resolution
 as a JPEG. `previews/index.jsonl` records IDs, session timestamps, SDK frame numbers,
 dimensions, and filenames. Images sent to Claude are resized to a maximum edge of
-960 pixels. Older previews enter a fresh conversation only through `get_history`;
-the entire local archive remains available. Automatic prompt caching is enabled
-within each run. No run is summarized or silently truncated to fit capacity.
+960 pixels. Previews accumulate in the session conversation, with automatic prompt
+caching enabled. The entire local archive remains available after compaction.
 
-Before **every inference**, including after history retrieval, the program checks:
+### Session context compaction
+
+After an observation, WaitLess checks soft thresholds of **100,000 input tokens**,
+**20,000,000 request bytes**, or **400 images**. The token estimate uses the latest
+validated input count plus response output usage (or the output allowance when usage
+is unavailable); the next inference still gets an exact token-count preflight.
+Image count and byte size include nested history tool results. These are internal
+defaults, not user settings.
+
+When a threshold is reached and there is a legal older prefix to summarize, WaitLess
+sends `compaction: {"type": "summarize"}` to the same Sonnet model. It retains at
+least the **latest four observations** word for word. The split uses a previously
+sent request boundary, with its assistant reply at the start of the retained tail.
+Tool calls and their results stay together. This can retain an extra fragment of
+an older observation to preserve thinking signatures. The system prompt and tool
+definitions remain constant throughout the session.
+
+The summary preserves goals, observations with frame IDs and timestamps, uncertainty,
+interval changes, and factual capture outcomes. It is lossy memory, not image
+evidence: missing visual details must be retrieved with `get_history`. Only a valid
+signed compaction block replaces the old prefix. The block and retained messages
+are passed back unchanged; subsequent compaction includes the previous summary.
+An empty ordinary end turn is recorded as no action without adding an empty
+assistant message to later requests.
+
+Compaction runs **before fetching the next preview**, with a timeout bounded by
+90 seconds and the remaining session duration. It can delay the next observation;
+Auto samples when ready, while Fixed skips missed slots on its original schedule.
+The new preview gets its own freshness window. Stop and the session deadline still
+take precedence, including when a compaction request is already in flight.
+
+If compaction fails or produces no valid summary, the original conversation stays
+intact. The UI records the failure and monitoring continues. A new attempt requires
+both another completed observation and at least **60 seconds** since the failure.
+There is no immediate retry. If the unchanged context reaches a hard capacity limit,
+the session stops; it never silently drops images, truncates messages, or resets the agent.
+Compaction call usage is aggregated from `usage.iterations`, including cache tokens,
+without double-counting the top-level usage fields.
+
+### Hard capacity limits
+
+Before **every inference or compaction**, including after history retrieval, the program checks:
 
 | Resource | Maximum |
 | --- | --- |
@@ -254,9 +314,10 @@ Before **every inference**, including after history retrieval, the program check
 
 Image count and byte size are checked locally before either API endpoint is called.
 The token-count request includes the conversation, system instructions, tools,
-thinking setting, and cache configuration. An invalid count or failed check ends
-monitoring; it never falls back to sending an unchecked inference request. A token-count
-check and the inference each make an HTTP request, with no automatic retries.
+thinking setting, and cache configuration. An invalid count or failed check before
+an ordinary inference ends monitoring; it never sends an unchecked inference. A token-count
+check and the inference each make an HTTP request. For compaction, a failed check
+does not send an unchecked summary request; it leaves the old context for later observations.
 
 If a request would exceed a ceiling, monitoring ends with `capacity_reached` and
 reports the resource and limit. All previews, event traces, and transcripts remain
@@ -265,7 +326,11 @@ upper ceiling, not an expected request size.
 
 Each new session stores:
 
-- `runs/<preview ID>/conversation.jsonl`: that run's instruction and context,
+- `conversation.jsonl`: the session's append-only message and request history,
+  context revisions, compaction attempts, and signed summary replacements with the
+  exact prefix length replaced. Replaying appends and replacements reconstructs
+  the active context; no original log entries are deleted.
+- `runs/<preview ID>/conversation.jsonl`: that observation's instruction and new context,
   model responses, and tool results, including the final capture outcome.
 - `runs/<preview ID>/events.jsonl`: append-only request, tool, capture, and run
   progress. Events have stable IDs, sequence numbers, and UTC timestamps.
@@ -277,6 +342,13 @@ results, so journals do not repeat base64 data. The state API does not send full
 conversation transcripts to the browser. Existing output folders stay untouched;
 resuming old sessions remains unsupported. Refreshing the page reconstructs the
 current session from its report while the local server remains running.
+
+The report adds `context_revision`, `compaction_requests`, `compactions_completed`,
+`compaction_settings`, and the latest `compaction` status, duration, and safe usage
+or error metadata. `api_requests` includes both evaluations and summary calls;
+each observation's `model_calls` counts only its evaluations. The UI shows context
+organization in the activity trace and includes summary calls in the AI budget.
+Summary text and thinking blocks remain in local transcripts, outside the UI state response.
 
 ## Capture behavior
 
@@ -377,6 +449,7 @@ persistent internal process protocol, USB selection, capability checks, and capt
 safeguards. Claude decisions, timing, and capture limits remain in Python.
 
 - `model.py`: fixed Anthropic transport, native tool payloads, strict turn validation, and capacity checks.
+- `agent.py`: session conversation, thinking preservation, signed compaction boundaries, and append-only context log.
 - `history.py`: session-scoped history tools, per-run journals, and capture records.
 - `waitless.py`: validated session settings, monitoring, capture policy, and result recording.
 - `ui.py` / `web/`: local camera interface, session controls, and preview timeline.
@@ -385,6 +458,7 @@ safeguards. Claude decisions, timing, and capture limits remain in Python.
 - `native/camera_capabilities.h`: USB selection and capability-based capture policy.
 - `scripts/build_sony.py`: maintainer-only universal macOS build and runtime packaging with `clang++`.
 - `test_model.py`: tool-call validation, capacity boundaries, and fixed-endpoint transport checks.
+- `test_agent.py`: retained context, compaction signatures, repeated compaction, and journal reconstruction.
 - `test_history.py`: preview and conversation persistence with local image references.
 - `test_camera.py`: agent replay, call budgets, scheduling, capacity stops, capture limits, and cleanup.
 - `test_ui.py`: settings validation, exclusive camera ownership, local HTTP controls, and media access.
@@ -396,15 +470,21 @@ safeguards. Claude decisions, timing, and capture limits remain in Python.
 .venv/bin/python -m unittest -v
 ```
 
-Offline replays exercise fresh conversations, paginated history, retrieved images,
+Offline replays exercise session conversations, native compaction, paginated history, retrieved images,
 changing and unchanged scenes, capture confirmation, budgets, Stop, timing, and
-capacity preservation. Simulated UI sessions check trace expansion, history browsing,
+capacity preservation. Simulated UI sessions check the unified activity stream, history browsing,
 image viewing, capture markers, and refresh recovery. These checks validate the
 workflow, not recognition accuracy on a physical scene.
+
+The activity projection also has dependency-free Node tests for ordering, progress
+updates, capture outcomes, and cross-observation IDs: `node --test test_activity.mjs`.
+Node is only needed to run these developer tests, not to run WaitLess.
 
 [Claude Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/overview),
 [effort](https://platform.claude.com/docs/en/build-with-claude/effort),
 [thinking](https://platform.claude.com/docs/en/build-with-claude/thinking),
+[on-demand compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand),
+[compaction and thinking](https://platform.claude.com/docs/en/build-with-claude/compaction-thinking-blocks),
 [token counting](https://platform.claude.com/docs/en/api/messages/count_tokens),
 [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
 and [tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls).

@@ -1,4 +1,4 @@
-"""Local visual history, capture facts, and durable per-observation agent journals."""
+"""Local visual history, capture facts, and durable agent journals."""
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -107,6 +107,26 @@ class PreviewArchive:
         })
 
 
+def local_message(message, output, images=()):
+    """Keep signed blocks intact while replacing image bytes with archive references."""
+    remaining = iter(images)
+    def local(blocks):
+        result = []
+        for value in blocks:
+            if value.get('type') == 'image':
+                preview = next(remaining)
+                result.append({'type': 'image', 'file': str(preview.path.relative_to(output))})
+            elif value.get('type') == 'tool_result' and isinstance(value.get('content'), list):
+                result.append({**value, 'content': local(value['content'])})
+            else:
+                result.append(deepcopy(value))
+        return result
+    record = {'role': message['role'], 'content': local(message['content'])}
+    if next(remaining, None) is not None:
+        raise ValueError('Unused image references in agent journal')
+    return record
+
+
 class AgentJournal:
     def __init__(self, output, preview, entry, publish):
         self.output, self.preview, self.entry, self.publish = output, preview, entry, publish
@@ -116,23 +136,7 @@ class AgentJournal:
                           events_file=str((self.folder / 'events.jsonl').relative_to(output)), events=[])
 
     def message(self, message, images=()):
-        # Tool results nest images; journal references follow the same traversal order.
-        remaining = iter(images)
-        def local(blocks):
-            result = []
-            for value in blocks:
-                if value.get('type') == 'image':
-                    preview = next(remaining)
-                    result.append({'type': 'image', 'file': str(preview.path.relative_to(self.output))})
-                elif value.get('type') == 'tool_result' and isinstance(value.get('content'), list):
-                    result.append({**value, 'content': local(value['content'])})
-                else:
-                    result.append(deepcopy(value))
-            return result
-        record = {'role': message['role'], 'content': local(message['content'])}
-        if next(remaining, None) is not None:
-            raise ValueError('Unused image references in agent journal')
-        append_json(self.folder / 'conversation.jsonl', record)
+        append_json(self.folder / 'conversation.jsonl', local_message(message, self.output, images))
 
     def event(self, kind, status, action_id, **details):
         seq = len(self.entry['events'])

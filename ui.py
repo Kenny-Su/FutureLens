@@ -203,7 +203,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/state":
                 self._json(self.server.manager.state())
-            elif path in ("/", "/app.js", "/style.css"):
+            elif path in ("/", "/app.js", "/activity.mjs", "/style.css"):
                 self._file(STATIC / ("index.html" if path == "/" else path[1:]))
             elif path.startswith("/media/"):
                 _, _, session, name = path.split("/", 3)

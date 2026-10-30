@@ -13,7 +13,7 @@ from PIL import Image
 from camera import CameraError, CameraFrame, SonyCamera
 import waitless as fl
 import model
-from test_model import answer, tool
+from test_model import answer, compacted, tool
 
 
 class Clock:
@@ -75,6 +75,9 @@ class CameraWorkflowTests(unittest.TestCase):
         self.replies = None
         self.count_delay = self.inference_delay = 0
         self.tokens = 1000
+        self.compaction_delay = 0
+        self.compaction_replies = None
+        self.compaction_times = []
         for target, kwargs in [
             ("waitless.SonyCamera", {"return_value": self.camera}),
             ("waitless.load_config", {"return_value": model.ApiConfig(api_key="offline-test")}),
@@ -93,13 +96,20 @@ class CameraWorkflowTests(unittest.TestCase):
         if endpoint == model.TOKEN_COUNT_ENDPOINT:
             self.clock.sleep(self.count_delay)
             return {"input_tokens": self.tokens}
+        if "compaction" in payload:
+            self.compaction_times.append(self.clock.now)
+            self.clock.sleep(self.compaction_delay)
+            reply = next(self.compaction_replies) if self.compaction_replies is not None else compacted()
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
         self.clock.sleep(self.inference_delay)
         if self.replies is not None:
             reply = next(self.replies)
             if isinstance(reply, BaseException):
                 raise reply
             return reply
-        return answer(self.action)
+        return answer("wait") if self.action == "wait" else tool(self.action, call_id=f"call-{len(self.requests)}")
 
     def settings(self, **overrides):
         return fl.SessionSettings(**{
@@ -117,7 +127,8 @@ class CameraWorkflowTests(unittest.TestCase):
         return json.loads(self.journal(frame_id)[-1]["content"][0]["content"][0]["text"])
 
     def inferences(self):
-        return [payload for endpoint, payload, _ in self.requests if endpoint == model.API_ENDPOINT]
+        return [payload for endpoint, payload, _ in self.requests
+                if endpoint == model.API_ENDPOINT and "compaction" not in payload]
 
     def test_session_settings_defaults_and_validation(self):
         settings = fl.SessionSettings(request="landscape")
@@ -132,12 +143,13 @@ class CameraWorkflowTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.settings(**invalid)
 
-    def test_first_observation_is_immediate_and_every_conversation_is_fresh(self):
+    def test_first_observation_is_immediate_and_conversation_persists(self):
         fl.run_session(self.settings(), self.output)
         self.assertEqual(self.camera.frame_times, [100, 160, 220])
         payloads = self.inferences()
-        self.assertEqual([len(p["messages"]) for p in payloads], [1, 1, 1])
-        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 1, 1])
+        self.assertEqual([len(p["messages"]) for p in payloads], [1, 3, 5])
+        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 2, 3])
+        self.assertEqual(payloads[2]["messages"][:3], payloads[1]["messages"])
         self.assertTrue(all('"user_request"' in p["messages"][0]["content"][0]["text"] for p in payloads))
         report = self.report()
         self.assertEqual((report["previews_saved"], report["api_requests"], report["token_count_requests"]), (3, 3, 3))
@@ -146,14 +158,15 @@ class CameraWorkflowTests(unittest.TestCase):
         for frame_id in range(3):
             self.assertEqual(len(self.journal(frame_id)), 3)
         self.assertNotIn("base64", (self.output / "runs/000000/conversation.jsonl").read_text())
-        self.assertFalse((self.output / "conversation.jsonl").exists())
+        self.assertTrue((self.output / "conversation.jsonl").exists())
+        self.assertNotIn("base64", (self.output / "conversation.jsonl").read_text())
 
     def test_auto_slows_down_then_speeds_up_and_captures_with_history(self):
         self.replies = iter([
             tool("set_preview_interval", {"seconds": 300}),
             tool("get_history", {"frame_ids": [0]}, "compare"),
             tool("set_preview_interval", {"seconds": 10}, "timing"),
-            answer("shoot"),
+            tool("shoot", call_id="capture"),
         ])
         fl.run_session(self.settings(preview_mode="auto", duration=500, max_requests=4, max_shots=1), self.output)
         self.assertEqual(self.camera.frame_times, [100, 400, 410])
@@ -163,7 +176,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual([entry["outcome"] for entry in report["observations"]],
                          ["preview_interval_set", "preview_interval_set", "downloaded"])
         self.assertTrue(all(entry["run_status"] == "finished" for entry in report["observations"]))
-        sampling = json.loads(self.inferences()[1]["messages"][0]["content"][0]["text"])["sampling"]
+        sampling = json.loads(self.inferences()[1]["messages"][-1]["content"][0]["text"])["sampling"]
         self.assertEqual((sampling["mode"], sampling["min_interval_s"], sampling["max_interval_s"]), ("auto", 10, 300))
         self.assertEqual(sampling["current_interval_s"], 300)
         self.assertEqual(self.tool_outcome()["seconds"], 300)
@@ -176,13 +189,13 @@ class CameraWorkflowTests(unittest.TestCase):
 
     def test_auto_interval_persists_after_plain_end_turn_and_capture(self):
         self.replies = iter([answer("wait"), tool("set_preview_interval", {"seconds": 300}),
-                             answer("wait"), answer("shoot"), answer("wait")])
+                             answer("wait"), tool("shoot", call_id="capture"), answer("wait")])
         fl.run_session(self.settings(preview_mode="auto", interval=45, duration=1000, max_requests=5), self.output)
         self.assertEqual(self.camera.frame_times, [100, 160, 460, 760, 1060])
         self.assertEqual([entry["next_preview_interval_s"] for entry in self.report()["observations"]], [60, 300, 300, 300, 300])
         self.assertEqual(self.report()["current_interval_s"], 300)
         self.assertEqual(self.report()["last_interval_change"]["from_frame_id"], 1)
-        sampling = [json.loads(p["messages"][0]["content"][0]["text"])["sampling"] for p in self.inferences()]
+        sampling = [json.loads(p["messages"][-1]["content"][0]["text"])["sampling"] for p in self.inferences()]
         self.assertEqual([s["current_interval_s"] for s in sampling], [60, 60, 300, 300, 300])
         self.assertEqual(self.camera.captures, [0])
         self.assertEqual(self.report()["api_requests"], 5)
@@ -194,6 +207,7 @@ class CameraWorkflowTests(unittest.TestCase):
         report = json.loads((destination / "results.json").read_text())
         self.assertEqual(report["current_interval_s"], 60)
         self.assertIsNone(report["last_interval_change"])
+        self.assertEqual(len(self.inferences()[-1]["messages"]), 1)
 
     def test_auto_rejected_changes_and_run_limit_keep_current_interval(self):
         self.replies = iter([tool("set_preview_interval", {"seconds": 300}),
@@ -204,6 +218,59 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.report()["observations"][1]["outcome"], "run_limit")
         self.assertEqual([entry["next_preview_interval_s"] for entry in self.report()["observations"]], [300, 300, 300])
         self.assertEqual(self.report()["last_interval_change"]["from_frame_id"], 0)
+
+    def test_auto_unchanged_initial_interval_is_a_noop_without_another_inference(self):
+        self.replies = iter([tool("set_preview_interval", {"seconds": 60})])
+        fl.run_session(self.settings(preview_mode="auto", max_requests=1), self.output)
+        report = self.report()
+        self.assertEqual(report["current_interval_s"], 60)
+        self.assertIsNone(report["last_interval_change"])
+        self.assertEqual((report["api_requests"], report["token_count_requests"]), (1, 1))
+        entry = report["observations"][0]
+        self.assertEqual((entry["outcome"], entry["run_status"]), ("preview_interval_unchanged", "finished"))
+        self.assertEqual(entry["next_preview_interval_s"], 60)
+        result = self.tool_outcome()
+        self.assertIs(result["changed"], False)
+        self.assertIn("No action.", result["message"])
+        self.assertFalse(self.journal()[-1]["content"][0]["is_error"])
+        event = [event for event in entry["events"] if event["kind"] == "tool"][-1]
+        self.assertEqual(event["status"], "skipped")
+        self.assertIs(event["changed"], False)
+
+    def test_auto_repeated_current_interval_preserves_schedule_and_last_actual_change(self):
+        self.replies = iter([
+            tool("set_preview_interval", {"seconds": seconds}, f"interval-{index}")
+            for index, seconds in enumerate([30, 15, 15, 15, 15, 15])
+        ] + [tool("shoot", call_id="capture")])
+        fl.run_session(self.settings(preview_mode="auto", max_requests=7, max_shots=1), self.output)
+        report = self.report()
+        self.assertEqual(self.camera.frame_times, [100, 130, 145, 160, 175, 190, 205])
+        self.assertEqual(report["api_requests"], 7)
+        self.assertEqual(report["token_count_requests"], 7)
+        self.assertEqual(report["current_interval_s"], 15)
+        self.assertEqual(report["last_interval_change"], {"previous_seconds": 30, "seconds": 15, "from_frame_id": 1})
+        self.assertEqual([entry["outcome"] for entry in report["observations"]],
+                         ["preview_interval_set"] * 2 + ["preview_interval_unchanged"] * 4 + ["downloaded"])
+        self.assertTrue(all(entry["model_calls"] == 1 for entry in report["observations"]))
+        self.assertEqual(self.camera.captures, [0])
+        # Feedback for each no-op is retained in the next observation's conversation.
+        for frame_id in range(2, 6):
+            result = self.inferences()[frame_id + 1]["messages"][-2]["content"][0]
+            self.assertEqual(result["tool_use_id"], f"interval-{frame_id}")
+            self.assertIs(json.loads(result["content"][0]["text"])["changed"], False)
+
+    def test_auto_no_action_reply_keeps_monitoring_without_a_tool_call(self):
+        no_action = {"stop_reason": "end_turn", "content": [{"type": "text", "text": "No action."}]}
+        self.replies = iter([tool("set_preview_interval", {"seconds": 15}), no_action, no_action])
+        fl.run_session(self.settings(preview_mode="auto"), self.output)
+        report = self.report()
+        self.assertEqual(self.camera.frame_times, [100, 115, 130])
+        self.assertEqual(report["current_interval_s"], 15)
+        self.assertEqual(report["last_interval_change"]["from_frame_id"], 0)
+        self.assertEqual(report["api_requests"], 3)
+        for entry in report["observations"][1:]:
+            self.assertEqual(entry["outcome"], "no_photo")
+            self.assertFalse(any(event["kind"] == "tool" for event in entry["events"]))
 
     def test_auto_interval_is_measured_from_preview_not_response(self):
         self.camera.frame_delay, self.count_delay, self.inference_delay = 2, 2, 3
@@ -240,7 +307,7 @@ class CameraWorkflowTests(unittest.TestCase):
             if self.camera.frames == 1:
                 return tool("set_preview_interval", {"seconds": 120})
             self.clock.sleep(31)
-            return tool("set_preview_interval", {"seconds": 300})
+            return tool("set_preview_interval", {"seconds": 300}, "stale")
         with patch("waitless.call_model", side_effect=inference):
             fl.run_session(self.settings(preview_mode="auto", max_requests=2), self.output)
         self.assertEqual(self.report()["observations"][1]["outcome"], "stale_preview")
@@ -356,14 +423,14 @@ class CameraWorkflowTests(unittest.TestCase):
                              tool("get_history", {"frame_ids": [0]}, "get-1"), answer("shoot")])
         fl.run_session(self.settings(max_requests=10, max_shots=1), self.output)
         payloads = self.inferences()
-        self.assertEqual([len(p["messages"]) for p in payloads], [1, 1, 3, 5])
-        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 1, 1, 2])
+        self.assertEqual([len(p["messages"]) for p in payloads], [1, 3, 5, 7])
+        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 2, 2, 3])
         self.assertEqual(payloads[-1]["messages"][-1]["content"][0]["tool_use_id"], "get-1")
         self.assertEqual(self.camera.captures, [0])
         self.assertEqual(self.tool_outcome(1)["capture_status"], "downloaded")
         self.assertEqual(self.report()["observations"][1]["model_calls"], 3)
         for payload in payloads[2:]:
-            self.assertEqual(payload["messages"][1]["content"], history_call["content"])
+            self.assertEqual(payload["messages"][3]["content"], history_call["content"])
         self.assertEqual(self.journal(1)[2]["content"], history_call["content"])
         counts = [payload for endpoint, payload, _ in self.requests if endpoint == model.TOKEN_COUNT_ENDPOINT]
         for counted, inferred in zip(counts, payloads):
@@ -392,7 +459,8 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.camera.frame_times, [100, 160])
         self.assertEqual(self.report()["token_count_requests"], 12)
         self.assertEqual(self.report()["api_requests"], 12)
-        self.assertEqual(len(self.inferences()[6]["messages"]), 1)
+        self.assertEqual(len(self.inferences()[6]["messages"]), 14)
+        self.assertEqual(self.inferences()[6]["messages"][-2]["content"][0]["tool_use_id"], "list-5")
         self.assertEqual(self.report()["stop_reason"], "max_requests")
 
     def test_duplicate_tool_ids_never_execute_a_shutter(self):
@@ -401,6 +469,176 @@ class CameraWorkflowTests(unittest.TestCase):
             fl.run_session(self.settings(), self.output)
         self.assertEqual(self.camera.captures, [])
         self.assertEqual(self.report()["status"], "failed")
+
+    def test_tool_id_deduplication_and_thinking_span_observations(self):
+        reply = tool("set_preview_interval", {"seconds": 10}, "same")
+        reply["content"].insert(0, {"type": "thinking", "thinking": "", "signature": "opaque"})
+        self.replies = iter([reply, tool("shoot", call_id="same")])
+        with self.assertRaises(ValueError):
+            fl.run_session(self.settings(preview_mode="auto"), self.output)
+        self.assertEqual(self.camera.frame_times, [100, 110])
+        self.assertEqual(self.camera.captures, [])
+        self.assertEqual(self.inferences()[1]["messages"][1]["content"], reply["content"])
+        self.assertEqual(self.inferences()[1]["messages"][2]["content"][0]["tool_use_id"], "same")
+
+    def test_history_followup_refreshes_budget_without_rewriting_prefix(self):
+        self.count_delay, self.inference_delay = 2, 5
+        self.replies = iter([tool("list_history", call_id="list"), answer("wait")])
+        fl.run_session(self.settings(max_requests=2), self.output)
+        first, second = self.inferences()
+        self.assertEqual(second["messages"][:1], first["messages"])
+        state = json.loads(second["messages"][-1]["content"][0]["content"][-1]["text"])["session"]
+        self.assertEqual(state["remaining_seconds"], 173)
+        self.assertEqual(state["preview_remaining_seconds"], 23)
+        self.assertEqual(state["model_calls_remaining"], 1)
+        self.assertEqual(state["observation_calls_remaining"], 5)
+
+    def test_serial_compaction_delays_sampling_but_capture_uses_fresh_preview(self):
+        for mode, expected in (("auto", 415), ("fixed", 460)):
+            with self.subTest(mode=mode):
+                destination = self.output.parent / mode
+                self.clock.now = 100
+                self.camera = FakeCamera(self.clock, destination)
+                self.factory.return_value = self.camera
+                self.requests.clear()
+                self.replies = iter([*[answer("wait") for _ in range(5)], answer("shoot")])
+                self.compaction_delay = 75
+                with patch("agent.COMPACT_INPUT_TOKENS", 1):
+                    fl.run_session(self.settings(preview_mode=mode, duration=1000, max_requests=7, max_shots=1), destination)
+                report = json.loads((destination / "results.json").read_text())
+                self.assertEqual(self.camera.frame_times, [100, 160, 220, 280, 340, expected])
+                self.assertEqual(self.camera.max_delays, [30])
+                self.assertEqual((report["api_requests"], report["compaction_requests"], report["compactions_completed"]), (7, 1, 1))
+                self.assertEqual(report["token_count_requests"], 7)
+                self.assertEqual(sum(e["model_calls"] for e in report["observations"]), 6)
+                self.assertEqual(self.inferences()[-1]["messages"][0]["content"], compacted()["content"])
+                self.assertEqual(report["compaction"]["usage"]["output_tokens"], 80)
+                self.assertNotIn("signed-summary", json.dumps(report))
+                events = [e for e in report["observations"][4]["events"] if e["kind"] == "compaction"]
+                self.assertEqual(len({e["action_id"] for e in events}), 1)
+                self.assertEqual([e["status"] for e in events], ["checking", "started", "completed"])
+
+    def test_compaction_failure_continues_and_retries_after_time_and_new_observation(self):
+        self.compaction_replies = iter([RuntimeError("temporary failure"), compacted()])
+        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("agent.KEEP_OBSERVATIONS", 1):
+            fl.run_session(self.settings(interval=10, duration=120, max_requests=12), self.output)
+        self.assertEqual(self.compaction_times, [110, 170])
+        self.assertEqual(self.camera.frame_times, list(range(100, 200, 10)))
+        self.assertEqual(self.inferences()[2]["messages"][:3], self.inferences()[1]["messages"])
+        report = self.report()
+        self.assertEqual((report["api_requests"], report["compaction_requests"], report["compactions_completed"]), (12, 2, 1))
+        self.assertEqual(report["context_revision"], 1)
+        self.assertEqual(report["status"], "completed")
+        self.assertTrue(any(e["kind"] == "compaction" and e["status"] == "failed"
+                            for entry in report["observations"] for e in entry["events"]))
+
+    def test_invalid_compaction_cannot_execute_tools_or_replace_history(self):
+        self.compaction_replies = iter([tool("shoot", call_id="compaction-shoot")])
+        with patch("agent.COMPACT_INPUT_TOKENS", 1):
+            fl.run_session(self.settings(duration=1000, max_requests=7), self.output)
+        self.assertEqual(self.report()["compaction"]["status"], "failed")
+        self.assertEqual(self.report()["context_revision"], 0)
+        self.assertEqual(self.camera.captures, [])
+        self.assertEqual(len(self.inferences()[-1]["messages"]), 11)
+        self.assertEqual(self.report()["api_requests"], 7)
+
+    def test_history_tool_reloads_an_image_removed_by_compaction(self):
+        self.replies = iter([*[answer("wait") for _ in range(5)],
+                             tool("get_history", {"frame_ids": [0]}, "old-image"), answer("shoot")])
+        with patch("agent.COMPACT_INPUT_TOKENS", 1):
+            fl.run_session(self.settings(duration=1000, max_requests=10, max_shots=1), self.output)
+        before, after = self.inferences()[-2:]
+        self.assertEqual(model.check_capacity(before)["images"], 5)
+        self.assertEqual(model.check_capacity(after)["images"], 6)
+        fetched = after["messages"][-1]["content"][0]["content"]
+        self.assertEqual(json.loads(fetched[0]["text"])["frame_id"], 0)
+        self.assertEqual(fetched[1], self.inferences()[0]["messages"][0]["content"][1])
+        self.assertEqual(self.report()["photos_taken"], 1)
+        self.assertEqual(self.report()["context_revision"], 1)
+
+    def test_compaction_failure_eventually_stops_at_hard_capacity(self):
+        self.compaction_replies = iter([RuntimeError("offline"), RuntimeError("offline")])
+        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("model.MAX_IMAGES", 6):
+            fl.run_session(self.settings(duration=1000, max_requests=20), self.output)
+        self.assertEqual(self.report()["status"], "capacity_reached")
+        self.assertEqual(self.report()["capacity"], {"resource": "images", "used": 7, "limit": 6})
+        self.assertEqual(len(list((self.output / "previews").glob("*.jpg"))), 7)
+        self.assertEqual(self.report()["context_revision"], 0)
+
+    def test_no_compaction_spends_last_remaining_call(self):
+        with patch("agent.COMPACT_INPUT_TOKENS", 1):
+            fl.run_session(self.settings(duration=1000, max_requests=6), self.output)
+        self.assertEqual(self.compaction_times, [])
+        self.assertEqual(len(self.inferences()), 6)
+        self.assertEqual(self.report()["stop_reason"], "max_requests")
+
+    def test_compaction_count_failure_preserves_context_without_sending_summary(self):
+        original = self.api
+        def api(endpoint, payload, config, timeout):
+            if "compaction" in payload and endpoint == model.TOKEN_COUNT_ENDPOINT:
+                raise RuntimeError("unavailable count")
+            return original(endpoint, payload, config, timeout)
+        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("model._post", side_effect=api):
+            fl.run_session(self.settings(duration=1000, max_requests=6 + 1), self.output)
+        self.assertEqual(self.report()["compaction_requests"], 0)
+        self.assertEqual(self.report()["context_revision"], 0)
+        self.assertEqual(self.report()["compaction"]["status"], "failed")
+        self.assertEqual(len(self.inferences()), 7)
+
+    def test_stop_during_compaction_prevents_next_preview(self):
+        stop = threading.Event()
+        original = self.api
+        def api(endpoint, payload, config, timeout):
+            if "compaction" in payload and endpoint == model.API_ENDPOINT:
+                stop.set()
+            return original(endpoint, payload, config, timeout)
+        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("model._post", side_effect=api), \
+                patch.object(stop, "wait", side_effect=self.clock.sleep):
+            fl.run_session(self.settings(duration=1000, max_requests=10), self.output, stop_event=stop)
+        self.assertEqual(self.camera.frames, 5)
+        self.assertEqual(self.report()["status"], "stopped")
+        self.assertEqual(self.report()["api_requests"], 6)
+        self.assertTrue(self.camera.closed)
+
+    def test_stop_during_compaction_count_does_not_spend_ai_budget(self):
+        stop = threading.Event()
+        original = self.api
+        def api(endpoint, payload, config, timeout):
+            if "compaction" in payload and endpoint == model.TOKEN_COUNT_ENDPOINT:
+                stop.set()
+            return original(endpoint, payload, config, timeout)
+        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("model._post", side_effect=api), \
+                patch.object(stop, "wait", side_effect=self.clock.sleep):
+            fl.run_session(self.settings(duration=1000, max_requests=10), self.output, stop_event=stop)
+        self.assertEqual(self.report()["api_requests"], 5)
+        self.assertEqual(self.report()["compaction_requests"], 0)
+        self.assertEqual(self.report()["status"], "stopped")
+
+    def test_compaction_timeout_is_bounded_by_session_deadline(self):
+        self.compaction_delay = 70
+        with patch("agent.COMPACT_INPUT_TOKENS", 1):
+            fl.run_session(self.settings(duration=310, max_requests=10), self.output)
+        calls = [(payload, timeout) for endpoint, payload, timeout in self.requests
+                 if endpoint == model.API_ENDPOINT and "compaction" in payload]
+        self.assertEqual(calls[0][1], 70)
+        self.assertEqual(self.camera.frames, 5)
+        self.assertEqual(self.report()["stop_reason"], "duration")
+        self.assertEqual(self.clock.now, 410)
+
+    def test_stop_immediately_before_compaction_dispatch_rolls_back_reserved_call(self):
+        stop = threading.Event()
+        write = fl.write_json
+        def publish(path, report):
+            write(path, report)
+            if (report.get("compaction") or {}).get("status") == "started":
+                stop.set()
+        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("waitless.write_json", side_effect=publish), \
+                patch.object(stop, "wait", side_effect=self.clock.sleep):
+            fl.run_session(self.settings(duration=1000, max_requests=10), self.output, stop_event=stop)
+        self.assertEqual(self.report()["api_requests"], 5)
+        self.assertEqual(self.report()["compaction_requests"], 0)
+        self.assertEqual(self.report()["compaction"]["status"], "skipped")
+        self.assertEqual(self.compaction_times, [])
 
     def test_history_round_that_ages_preview_starts_no_further_inference(self):
         self.inference_delay = 31
@@ -438,11 +676,11 @@ class CameraWorkflowTests(unittest.TestCase):
 
     def test_retrieved_image_capacity_preserves_the_run_and_all_previews(self):
         self.replies = iter([answer("wait"), answer("wait"), tool("get_history", {"frame_ids": [0, 1]})])
-        with patch("model.MAX_IMAGES", 2):
+        with patch("model.MAX_IMAGES", 4):
             fl.run_session(self.settings(max_requests=5), self.output)
         report = self.report()
         self.assertEqual(report["status"], "capacity_reached")
-        self.assertEqual(report["capacity"], {"resource": "images", "used": 3, "limit": 2})
+        self.assertEqual(report["capacity"], {"resource": "images", "used": 5, "limit": 4})
         self.assertEqual((report["previews_saved"], report["api_requests"], report["token_count_requests"]), (3, 3, 3))
         self.assertEqual(len(list((self.output / "previews").glob("*.jpg"))), 3)
         retrieved = self.journal(2)[-1]["content"][0]["content"]

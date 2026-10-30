@@ -46,7 +46,7 @@ time. WaitLess separates observation from capture:
 | --- | --- | --- |
 | During the wait | A full-resolution photograph at each interval | A lightweight preview at each observation |
 | What triggers a photograph | The next scheduled interval | A match to your visual instruction |
-| After the session | Search the captured sequence for the moment | Review selective captures alongside a preview timeline |
+| After the session | Search the captured sequence for the moment | Review previews, actions, and selective captures in one session timeline |
 
 ## Less watching. Less sorting. Your camera's quality.
 
@@ -65,7 +65,10 @@ time. WaitLess separates observation from capture:
 - **Spend attention where the scene is changing.** Auto mode lets the model space
   out checks during quiet periods and bring them closer together as your moment
   approaches. It keeps the current interval until a change is needed; interval
-  changes appear in the preview timeline.
+  changes appear alongside previews in the session activity stream.
+- **Follow the scene over time.** One agent follows each session, keeping recent
+  previews and decisions in context. Longer sessions summarize older observations;
+  the saved preview history remains available for a closer look.
 
 Live view, the connected computer, and AI evaluation still have power and API
 costs. Net battery savings have not been measured.

@@ -21,8 +21,15 @@ def tool(name, arguments=None, call_id="call-1"):
 
 def answer(action):
     if action == "wait":
-        return {"model": model.MODEL, "stop_reason": "end_turn", "content": []}
+        return {"model": model.MODEL, "stop_reason": "end_turn", "content": [{"type": "text", "text": "No photo."}]}
     return tool(action)
+
+
+def compacted(text="Prior session observations", signature="signed-summary"):
+    return {"stop_reason": "compaction", "content": [
+        {"type": "compaction", "content": text, "signature": signature}],
+        "usage": {"input_tokens": 0, "output_tokens": 0, "iterations": [
+            {"type": "compaction", "input_tokens": 1000, "output_tokens": 80}]}}
 
 
 class ModelTests(unittest.TestCase):
@@ -101,7 +108,7 @@ class ModelTests(unittest.TestCase):
         for action in (answer("wait"), tool("set_preview_interval", {"seconds": 10}), answer("shoot")):
             response = {**action, "content": blocks + action["content"]}
             parsed = model.parse_turn(response, set())
-            self.assertEqual(parsed, action["content"][0] if action["content"] else None)
+            self.assertEqual(parsed, action["content"][0] if action["stop_reason"] == "tool_use" else None)
             self.assertEqual(response["content"][:2], blocks)
         invalid = [{"type": "thinking", "thinking": ""},
                    {"type": "thinking", "thinking": None, "signature": "signed"},
@@ -160,7 +167,28 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(json.loads(sent.data)["model"], "claude-sonnet-5-5")
         self.assertEqual(sent.get_header("X-api-key"), "test-key")
         self.assertEqual(sent.get_header("Anthropic-version"), model.API_VERSION)
+        self.assertEqual(sent.get_header("Anthropic-beta"), model.COMPACTION_BETA)
         self.assertEqual(sent.get_header("Anthropic-workspace-id"), "wrkspc_test")
+
+    def test_compaction_request_and_signed_result_protocol(self):
+        messages = [{"role": "user", "content": [model.text_content("session")]}]
+        ordinary = model.make_payload(messages, preview_mode="fixed")
+        summary = model.make_compaction_payload(messages, preview_mode="fixed")
+        self.assertEqual({k: v for k, v in summary.items() if k != "compaction"}, ordinary)
+        self.assertEqual(summary["compaction"]["type"], "summarize")
+        self.assertNotIn("context_management", summary)
+        response = compacted()
+        self.assertEqual(model.parse_compaction(response), {"role": "assistant", "content": response["content"]})
+        self.assertEqual(model.response_usage(response)["output_tokens"], 80)
+        response["usage"]["output_tokens"] = 80
+        self.assertEqual(model.response_usage(response)["output_tokens"], 80)  # No double counting.
+        for invalid in (None, {}, answer("shoot"), {**response, "stop_reason": "max_tokens"},
+                        {**response, "content": []},
+                        {**response, "content": [{"type": "compaction", "content": "summary"}]},
+                        {**response, "content": [{"type": "compaction", "content": "", "signature": "x"}]},
+                        {**response, "content": response["content"] + answer("shoot")["content"]}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                model.parse_compaction(invalid)
 
     @patch.dict("os.environ", {}, clear=True)
     def test_both_endpoints_require_a_key(self):

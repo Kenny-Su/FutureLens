@@ -7,7 +7,7 @@
   <title>WaitLess · Delegate the waiting</title>
   <meta name="description" content="Describe the moment you want. WaitLess observes lightweight previews and captures selectively, so you can delegate the waiting.">
   <link rel="stylesheet" href="/style.css">
-  <script src="/app.js" defer></script>
+  <script src="/app.js" type="module"></script>
 </head>
 <body>
   <header class="topbar">
@@ -48,7 +48,7 @@
               <label>Watch for<div class="number-field"><input name="duration_minutes" id="duration" type="number" value="60" min="1" step="1" required><span>min</span></div></label>
               <label>Photo limit<div class="number-field"><input name="max_shots" id="max-shots" type="number" value="1" min="1" step="1" required><span>photos</span></div></label>
             </div>
-            <details class="advanced"><summary>AI budget</summary><div><label for="max-requests">Maximum AI calls</label><input name="max_requests" id="max-requests" type="number" value="360" min="1" step="1" required><p class="muted small">Up to six calls per observation. The session ends when this budget is used.</p></div></details>
+            <details class="advanced"><summary>AI budget</summary><div><label for="max-requests">Maximum AI calls</label><input name="max_requests" id="max-requests" type="number" value="360" min="1" step="1" required><p class="muted small">Includes scene evaluations and session summaries. Up to six evaluations per observation. The session ends when this budget is used.</p></div></details>
           </div>
           <div class="form-footer"><p class="muted small">Every preview saved.<br>Every captured moment marked.</p><button class="button primary" id="start" type="submit">Start monitoring <span>↗</span></button></div>
           <p class="privacy-note">Sampled previews are sent to Claude for evaluation. Originals stay on your computer. Recognition is experimental.</p>
@@ -87,11 +87,11 @@
         <p id="output-path" class="output-path"></p>
       </div>
       <section class="timeline-section" aria-labelledby="timeline-title">
-        <div class="timeline-header"><div><h2 id="timeline-title">Scene timeline</h2><span id="timeline-count" class="muted small">Every observation, in order</span></div><button id="go-latest" class="text-button" type="button" hidden>Return to latest →</button></div>
-        <div id="timeline" class="timeline" tabindex="0" aria-label="Preview timeline. Scroll horizontally to browse observations."></div>
+        <div class="timeline-header"><div><h2 id="timeline-title">Session activity</h2><span id="timeline-count" class="muted small">Previews and actions, in order</span></div><button id="go-latest" class="text-button" type="button" hidden>Return to latest ↓</button></div>
+        <div id="timeline" class="timeline" tabindex="0" aria-label="Session activity. Scroll vertically to browse previews and actions."></div>
         <div id="timeline-empty" class="timeline-empty">The first preview will appear here after the camera connects.</div>
       </section>
-      <p class="monitor-footnote">Each preview starts a fresh agent run. Open a card to follow its activity; monitoring continues while you browse.</p>
+      <p class="monitor-footnote">One session, one continuous thread. Previews and actions share this timeline; monitoring continues while you browse.</p>
     </section>
   </main>
   <dialog id="image-viewer" aria-labelledby="image-title">

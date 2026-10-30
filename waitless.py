@@ -9,10 +9,12 @@ import time
 from urllib.parse import urlsplit
 
 from camera import SonyCamera, CameraError, DEFAULT_HELPER
-from history import PreviewArchive, AgentJournal, capture_outcome
+from agent import (SessionAgent, COMPACT_INPUT_TOKENS, COMPACT_REQUEST_BYTES, COMPACT_IMAGES,
+                   KEEP_OBSERVATIONS, COMPACTION_RETRY_SECONDS)
+from history import PreviewArchive, AgentJournal, capture_outcome, append_json
 from model import (API_ENDPOINT, INSTRUCTIONS, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES, MAX_INPUT_TOKENS,
                    ApiError, CapacityReached, call_model, check_capacity, count_tokens, image_content,
-                   load_config, make_payload, parse_turn, text_content, validate_config, MAX_CALLS_PER_OBSERVATION,
+                   load_config, parse_compaction, response_usage, text_content, validate_config, MAX_CALLS_PER_OBSERVATION,
                    AUTO_MIN_INTERVAL, AUTO_MAX_INTERVAL, AUTO_INITIAL_INTERVAL,
                    EFFORT, THINKING, MAX_OUTPUT_TOKENS)
 
@@ -68,6 +70,7 @@ class Monitor:
         self.report, self.stop_event = report, stop_event
         self.last_capture = -math.inf
         self.latest_capture_outcome = self.last_downloaded_capture = None
+        self.agent = SessionAgent(output, settings.preview_mode)
 
     def publish(self):
         write_json(self.output / "results.json", self.report)
@@ -123,20 +126,30 @@ class Monitor:
                       call_id + ":capture", **capture_outcome(entry))
         return capture_outcome(entry)
 
+    def current_state(self, preview, model_calls):
+        now = time.monotonic()
+        return {"remaining_seconds": max(0, self.deadline - now),
+                "photos_taken": self.report["photos_taken"], "photo_limit": self.settings.max_shots,
+                "model_calls_remaining": self.settings.max_requests - self.report["api_requests"],
+                "calls_per_observation": MAX_CALLS_PER_OBSERVATION,
+                "observation_calls_remaining": MAX_CALLS_PER_OBSERVATION - model_calls,
+                "preview_freshness_s": self.settings.max_frame_age,
+                "preview_remaining_seconds": max(0, preview.received_at + self.settings.max_frame_age - now),
+                "capture_cooldown_s": self.settings.cooldown,
+                "cooldown_remaining_s": max(0, self.settings.cooldown - (now - self.last_capture))}
+
+    def append_message(self, message, journal, images=()):
+        self.agent.append(message, journal.preview.id, images)
+        journal.message(message, images)
+
     def observe(self, preview, entry):
         journal = AgentJournal(self.output, preview, entry, self.publish)
-        messages, seen_ids = [], set()
+        entry["context_revision"] = self.agent.revision
         active = None
         outcome = "error"
         journal.message({"role": "system", "content": [{"type": "text", "text": INSTRUCTIONS}]})
         initial = {"user_request": self.settings.request, "preview": preview.metadata(),
-                   "session": {"remaining_seconds": max(0, self.deadline - time.monotonic()),
-                               "photos_taken": self.report["photos_taken"], "photo_limit": self.settings.max_shots,
-                               "model_calls_remaining": self.settings.max_requests - self.report["api_requests"],
-                               "calls_per_observation": MAX_CALLS_PER_OBSERVATION,
-                               "preview_freshness_s": self.settings.max_frame_age,
-                               "capture_cooldown_s": self.settings.cooldown,
-                               "cooldown_remaining_s": max(0, self.settings.cooldown - (time.monotonic() - self.last_capture))},
+                   "session": self.current_state(preview, 0),
                    "history": {"count": preview.id, "first_frame_id": 0 if preview.id else None,
                                "latest_frame_id": preview.id - 1 if preview.id else None},
                    "sampling": {"mode": self.settings.preview_mode,
@@ -146,8 +159,7 @@ class Monitor:
                    "latest_capture_outcome": self.latest_capture_outcome,
                    "last_downloaded_capture": self.last_downloaded_capture}
         message = {"role": "user", "content": [text_content(initial), image_content(preview.image())]}
-        messages.append(message)
-        journal.message(message, [preview])
+        self.append_message(message, journal, [preview])
         journal.event("run", "started", "run", outcome="saved")
         try:
             for turn in range(1, MAX_CALLS_PER_OBSERVATION + 1):
@@ -161,7 +173,7 @@ class Monitor:
                 active = ("model", action_id)
                 self.report["phase"] = "checking"
                 journal.event("model", "checking", action_id, turn=turn)
-                payload = make_payload(messages, preview_mode=self.settings.preview_mode)
+                payload = self.agent.payload()
                 metrics = check_capacity(payload)
                 outcome = self.expired(preview)
                 if outcome:
@@ -189,9 +201,8 @@ class Monitor:
                     break
                 before = time.monotonic()
                 response = call_model(payload, self.config, timeout=min(90, self.deadline - before))
-                call = parse_turn(response, seen_ids, preview_mode=self.settings.preview_mode)
+                call = self.agent.accept_response(response, preview.id, metrics["input_tokens"])
                 message = {"role": "assistant", "content": response["content"]}
-                messages.append(message)
                 journal.message(message)
                 journal.event("model", "completed", action_id, turn=turn, latency_s=time.monotonic() - before)
                 active = None
@@ -210,8 +221,8 @@ class Monitor:
                         result = self.shoot(preview, entry, journal, call_id)
                     except (RuntimeError, OSError, KeyboardInterrupt):
                         # Even an uncertain capture has a factual terminal tool result.
-                        journal.message({"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id,
-                            "is_error": True, "content": [text_content(capture_outcome(entry))]}]})
+                        self.append_message({"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id,
+                            "is_error": True, "content": [text_content(capture_outcome(entry))]}]}, journal)
                         raise
                     content = [text_content(result)]
                     summary = result
@@ -229,10 +240,16 @@ class Monitor:
                                 raise ValueError(f"Use only integer seconds from {AUTO_MIN_INTERVAL} to {AUTO_MAX_INTERVAL}.")
                             result = {"previous_seconds": self.report["current_interval_s"],
                                       "seconds": seconds, "from_frame_id": preview.id}
-                            entry["next_preview_interval_s"] = seconds
-                            self.report.update(current_interval_s=seconds, last_interval_change=result)
+                            if seconds == self.report["current_interval_s"]:
+                                result.update(changed=False, message=(
+                                    f"Interval unchanged at {seconds} seconds. "
+                                    "Observation ended; monitoring continues automatically. "
+                                    "Reply No action. when no change or photograph is needed."))
+                            else:
+                                entry["next_preview_interval_s"] = seconds
+                                self.report.update(current_interval_s=seconds, last_interval_change=result)
                             content = [text_content(result)]
-                            summary = result
+                            summary = {key: value for key, value in result.items() if key != "message"}
                         elif name == "list_history":
                             result = self.archive.list_history(preview.id, arguments)
                             content = [text_content(result)]
@@ -247,17 +264,21 @@ class Monitor:
                         is_error = True
                         content = [text_content({"error": str(exc)})]
                         summary = {"error": str(exc)}
+                if name != "shoot" and not (name == "set_preview_interval" and not is_error):
+                    content.append(text_content({"current_preview_id": preview.id,
+                        "session": self.current_state(preview, entry["model_calls"])}))
                 message = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id,
                                                           "content": content, "is_error": is_error}]}
-                messages.append(message)
-                journal.message(message, images)
-                journal.event("tool", "failed" if is_error else "completed", "tool:" + call_id, name=name, **summary)
+                self.append_message(message, journal, images)
+                unchanged_interval = name == "set_preview_interval" and summary.get("changed") is False
+                journal.event("tool", "failed" if is_error else "skipped" if unchanged_interval else "completed",
+                              "tool:" + call_id, name=name, **summary)
                 active = None
                 if name == "shoot":
                     outcome = entry["capture_status"]
                     break
                 if name == "set_preview_interval" and not is_error:
-                    outcome = "preview_interval_set"
+                    outcome = "preview_interval_unchanged" if unchanged_interval else "preview_interval_set"
                     break
                 outcome = self.expired(preview)
                 if outcome:
@@ -280,7 +301,8 @@ class Monitor:
             if active:
                 journal.event(active[0], "skipped", active[1], reason=outcome)
             if entry["run_status"] != "failed":
-                entry["run_status"] = "finished" if outcome in ("no_photo", "downloaded", "preview_interval_set") else "skipped"
+                entry["run_status"] = "finished" if outcome in (
+                    "no_photo", "downloaded", "preview_interval_set", "preview_interval_unchanged") else "skipped"
             entry.update(outcome=outcome, frame_age_s=time.monotonic() - preview.received_at)
             self.archive.record_outcome(entry)
             if entry["capture_status"] != "not_requested":
@@ -289,6 +311,82 @@ class Monitor:
                     self.last_downloaded_capture = self.latest_capture_outcome
             journal.event("run", entry["run_status"], "run", outcome=outcome,
                           model_calls=entry["model_calls"], capture_outcome=capture_outcome(entry))
+
+    def compact_between_observations(self, preview, entry):
+        if (time.monotonic() >= self.deadline
+                or self.settings.max_requests - self.report["api_requests"] < 2):
+            return
+        check_stop(self.stop_event)
+        candidate = self.agent.compaction_candidate(preview.id, time.monotonic())
+        if candidate is None:
+            return
+        cut, payload = candidate
+        check_capacity(payload)
+        self.agent.last_attempt_observation = preview.id
+        self.report.update(phase="compacting", next_observation_at=None)
+        info = {"status": "checking", "observation_id": preview.id,
+                "context_revision": self.agent.revision}
+        self.report["compaction"] = info
+        self.publish()
+        started = time.monotonic()
+        # Record this in the last observation's trace, but not in its inference count.
+        def event(status, **details):
+            info.update(status=status, latency_s=time.monotonic() - started, **details)
+            self.agent.record("compaction_attempt", **info)
+            event_record = {"id": f"{preview.id}:{len(entry['events'])}", "sequence": len(entry["events"]),
+                "observation_id": preview.id, "timestamp": datetime.now(timezone.utc).isoformat(),
+                "elapsed_s": max(0, time.monotonic() - preview.received_at), "kind": "compaction",
+                "action_id": f"compaction:{preview.id}", **info}
+            append_json(self.output / entry["events_file"], event_record)
+            entry["events"].append(event_record)
+            self.publish()
+        event("checking")
+        reserved = dispatched = False
+        try:
+            check_stop(self.stop_event)
+            if time.monotonic() >= self.deadline:
+                event("skipped")
+                return
+            self.report["token_count_requests"] += 1
+            count_tokens(payload, self.config, timeout=min(90, self.deadline - time.monotonic()))
+            check_stop(self.stop_event)
+            if time.monotonic() >= self.deadline:
+                event("skipped")
+                return
+            self.report["api_requests"] += 1
+            self.report["compaction_requests"] += 1
+            reserved = True
+            event("started")
+            check_stop(self.stop_event)
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                self.report["api_requests"] -= 1
+                self.report["compaction_requests"] -= 1
+                reserved = False
+                event("skipped")
+                return
+            dispatched = True
+            response = call_model(payload, self.config, timeout=min(90, remaining))
+            info["usage"] = response_usage(response) if isinstance(response, dict) else {}
+            parse_compaction(response)
+        except (SessionStopped, CapacityReached):
+            if reserved and not dispatched:
+                self.report["api_requests"] -= 1
+                self.report["compaction_requests"] -= 1
+            event("skipped")
+            raise
+        except (ApiError, RuntimeError, ValueError) as exc:
+            self.agent.compaction_failed(time.monotonic())
+            details = {"error_type": type(exc).__name__, "retry_after_s": COMPACTION_RETRY_SECONDS}
+            if isinstance(exc, ApiError):
+                details["api_error"] = exc.details
+            event("failed", **details)
+            return
+        # Persistence errors must stop the session, never masquerade as recoverable API failures.
+        self.agent.apply_compaction(response, cut)
+        self.report["compactions_completed"] += 1
+        self.report["context_revision"] = self.agent.revision
+        event("completed", context_revision=self.agent.revision, usage=response_usage(response))
 
     def run(self, camera_helper):
         with SonyCamera(self.output / "moments", enable_capture=True, helper=camera_helper) as self.camera:
@@ -338,6 +436,12 @@ class Monitor:
                 if self.report["photos_taken"] >= self.settings.max_shots:
                     self.report["stop_reason"] = "max_shots"
                     break
+                try:
+                    self.compact_between_observations(preview, entry)
+                except CapacityReached as exc:
+                    self.report.update(status="capacity_reached", stop_reason="capacity_reached", capacity=exc.details)
+                    break
+                check_stop(self.stop_event)
                 if self.settings.preview_mode == "auto":
                     next_sample = max(time.monotonic(), preview.received_at + entry["next_preview_interval_s"])
                 else:
@@ -378,6 +482,11 @@ def run_session(settings: SessionSettings, output: Path, *, camera_helper=DEFAUL
         "calls_per_observation": MAX_CALLS_PER_OBSERVATION,
         "observations": [], "previews_saved": 0, "photos_taken": 0,
         "api_requests": 0, "token_count_requests": 0,
+        "conversation_file": "conversation.jsonl", "context_revision": 0,
+        "compaction_requests": 0, "compactions_completed": 0, "compaction": None,
+        "compaction_settings": {"input_tokens": COMPACT_INPUT_TOKENS, "request_bytes": COMPACT_REQUEST_BYTES,
+                                "images": COMPACT_IMAGES, "keep_observations": KEEP_OBSERVATIONS,
+                                "retry_after_s": COMPACTION_RETRY_SECONDS},
     }
     write_json(output / "results.json", report)
     try:
