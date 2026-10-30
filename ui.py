@@ -60,6 +60,7 @@ class SessionManager:
             if not self.helper.is_file():
                 raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
             self.output, self.error = output, None
+            self.camera_check = None
             self.stop_event = threading.Event()
             self._launch("monitor", lambda: self._monitor(settings))
 
@@ -120,8 +121,7 @@ class SessionManager:
                     "stopping": self.operation == "monitor" and self.stop_event.is_set(),
                     "session_id": self.output.name if self.output else None,
                     "output": str(self.output) if self.output else None,
-                    "report": self._report(), "error": self.error, "camera_check": self.camera_check,
-                    "api_ready": bool(load_config().api_key), "helper_ready": self.helper.is_file()}
+                    "report": self._report(), "error": self.error, "camera_check": self.camera_check}
 
     def media_file(self, session, name):
         with self.lock:

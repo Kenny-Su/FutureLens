@@ -120,15 +120,19 @@ or `--port 8766` to choose another port. Keep the terminal running. This command
 only launches the interface; instructions, settings, connection checks, and monitoring
 are controlled in the browser.
 
-1. Enter an instruction, or choose an example. **Preview timing** is automatic:
+1. Enter an instruction under **Describe the moment**. **Preview timing** is automatic:
    Claude chooses intervals between **10 seconds and 5 minutes**.
    There are no session duration, photograph-count, or AI-call budgets. Describe
    whether to capture once or repeat photographs when the condition occurs again.
    Monitoring continues until you press **Stop session**. The header shows elapsed
    time and cumulative preview, photograph, and AI-call counts.
-2. Optionally **Check connection** to detect the camera, assess capabilities, and
-   see a preview. This does not call Claude, enable capture, or take a photo.
-   The connection is released afterward and checked again when monitoring starts.
+2. Opening the setup page checks the camera once. The header shows **Camera connected**
+   after a successful check; click it (or **Check camera**) to check again.
+   This does not call Claude, enable capture, or take a photo. The status reflects
+   the last check, not continuous USB detection. Monitoring checks the connection again.
+   Connection and startup errors appear in a dismissible dialog; normal polling
+   does not repeatedly reopen the same error. Runtime and API configuration are
+   validated at startup without permanent status panels.
 3. **Start monitoring** opens a vertical **Session activity** stream. Previews,
    scene evaluations, tool calls, and context compaction appear as peers in time
    order. Timestamps are relative to the start of the session. Progress updates
@@ -225,8 +229,8 @@ No further inference or capture starts for that preview. An in-flight request ma
 finish, but cannot authorize an expired capture. Stop also prevents a subsequent
 capture. An SDK operation already in progress may take time to finish.
 
-Use **Check connection** for a local preview without an API key, inference call,
-shutter command, or changes to capture settings.
+Use **Check camera** to check the connection without an API key, inference call,
+shutter command, or changes to capture settings. The check saves a local preview.
 
 ## Agent tools and capacity
 

@@ -1,12 +1,6 @@
 import { sessionActivity } from "./activity.mjs";
 
 const $ = (id) => document.getElementById(id);
-const examples = {
-  clouds: "Photograph the mountain whenever its summit emerges from the clouds.",
-  fog: "Photograph the village whenever it becomes visible through the fog.",
-  sunrise: "Capture the mountain when warm sunrise light is visible on its summit.",
-  lights: "Take one photo of the building each time another apartment goes dark.",
-};
 const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", scheduling: "Updating preview interval…", compacting: "Organizing session context…", waiting: "Waiting for the next observation" };
 const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
 const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
@@ -14,6 +8,7 @@ const outcomes = { no_photo: "No photo", preview_interval_set: "Preview interval
 const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot", set_preview_interval: "Change preview interval" };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
+let checkedOnLoad = false, connectionProblemReported = false, lastCheckError = null, lastSessionError = null;
 const rows = new Map();
 const previews = new Map();
 
@@ -26,7 +21,27 @@ function clock(seconds) {
   return (hours ? `${hours}:` : "") + `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 function media(path) { return `/media/${encodeURIComponent(state.session_id)}/${path.split("/").map(encodeURIComponent).join("/")}`; }
-function notice(message) { text("notice", message || ""); show("notice", Boolean(message)); }
+function notice(message) {
+  const dialog = $("error-dialog");
+  if (!message) { if (dialog.open) dialog.close(); return; }
+  text("error-message", message);
+  if (!dialog.open) dialog.showModal();
+}
+
+function cameraCheckError(check) {
+  if (!check) return null;
+  if (check.error) return check.error;
+  if (!check.capabilities?.capture_ready) {
+    return check.capabilities?.capture_issues?.join(" ") || "The camera is connected but cannot take photographs. Check its shooting settings.";
+  }
+  return null;
+}
+
+function sessionError(next) {
+  const report = next.report || {};
+  return next.error || (report.status === "failed" ? report.camera_error || `Session stopped (${report.error_type || "error"}). Check the saved logs.`
+    : report.status === "capacity_reached" ? reasons.capacity_reached : null);
+}
 
 function loadPreview(image, url) {
   if (image.dataset.source === url) return;
@@ -53,6 +68,7 @@ async function command(path, data = {}) {
   if (pending || !connected) return false;
   pending = true;
   commandGeneration++;
+  if (path === "/api/check") lastCheckError = null;
   notice("");
   render();
   try {
@@ -84,27 +100,29 @@ function accept(next) {
   }
   initialized = true;
   render();
+  const checkError = cameraCheckError(state.camera_check);
+  if (checkError && checkError !== lastCheckError) notice(checkError);
+  lastCheckError = checkError;
+  const error = sessionError(state);
+  const key = error ? `${sessionId}:${error}` : null;
+  if (key && key !== lastSessionError) notice(error);
+  lastSessionError = key;
 }
 
 function renderSetup() {
-  const checking = state.operation === "check";
+  const report = state.report || {};
+  const monitoring = state.operation === "monitor";
+  const checking = state.operation === "check" || (monitoring && (!report.phase || report.phase === "connecting"));
   const check = state.camera_check;
-  const captureReady = check?.capabilities?.capture_ready;
-  text("helper-status", state.helper_ready ? "Included" : "Missing");
-  $("helper-status").className = state.helper_ready ? "ready" : "missing";
-  text("api-status", state.api_ready ? "Configured" : "Key missing");
-  $("api-status").className = state.api_ready ? "ready" : "missing";
-  text("camera-name", checking ? "Connecting…" : check?.model || "Sony USB camera");
-  $("camera-dot").className = `dot ${check?.error ? "error" : captureReady ? "ready" : ""}`;
-  text("camera-detail", checking ? "Checking USB connection and preview. No photo will be taken." : check?.error || (check?.model
-    ? captureReady ? "Connection checked. Live view and still-photo capture are available." : (check.capabilities?.capture_issues || ["Still-photo capture unavailable."]).join(" ")
-    : "Connect your camera in PC Remote mode. Check the connection to confirm your framing."));
-  show("check-preview", Boolean(check?.preview));
-  show("camera-icon", !check?.preview);
-  if (check?.preview) loadPreview($("check-preview"), check.preview);
-  $("check-camera").disabled = pending || !connected || Boolean(state.operation) || !state.helper_ready;
-  text("check-camera", checking ? "Checking connection…" : "Check connection ↗");
-  $("start").disabled = pending || !connected || Boolean(state.operation) || !state.api_ready || !state.helper_ready;
+  const error = check ? cameraCheckError(check) : report.camera_error;
+  const ready = !error && (check ? check.capabilities?.capture_ready : report.status !== "failed" && report.camera_capabilities?.capture_ready);
+  const healthy = connected && !checking && ready;
+  text("camera-status", !connected ? "Connection lost" : checking ? "Checking camera…" : error ? "Check camera" : ready ? "Camera connected" : "Check camera");
+  $("camera-dot").className = `dot ${healthy ? "ready" : error || !connected ? "error" : ""}`;
+  $("check-camera").disabled = pending || !connected || Boolean(state.operation);
+  $("check-camera").title = healthy ? "Last connection check succeeded. Click to check again." : "Check camera connection";
+  // Configuration is validated by the server; failures are shown in the dialog.
+  $("start").disabled = pending || !connected || Boolean(state.operation);
   show("return-session", Boolean(state.session_id));
 }
 
@@ -295,7 +313,7 @@ function renderMonitor() {
   const report = state.report || {};
   const entries = report.observations || [];
   const active = state.operation === "monitor";
-  const failed = report.status === "failed" || Boolean(state.error);
+  const failed = Boolean(sessionError(state));
   const stopping = state.stopping;
   text("monitor-title", active ? "Monitoring" : failed ? "Session ended" : report.status === "stopped" ? "Session stopped" : "Session complete");
   text("status-text", !connected ? "Reconnecting" : stopping ? "Stopping safely" : failed ? "Needs attention" : active ? (report.phase === "connecting" || !report.phase ? "Connecting" : "Monitoring") : report.status === "stopped" ? "Stopped" : "Finished");
@@ -310,7 +328,7 @@ function renderMonitor() {
   text("shot-count", report.photos_taken || 0);
   text("call-count", report.api_requests || 0);
   $("call-count").title = `${report.compaction_requests || 0} context summary calls included · ${report.compactions_completed || 0} completed`;
-  text("session-detail", failed ? state.error || report.camera_error || `Session stopped (${report.error_type || "error"}). Check the saved logs.`
+  text("session-detail", failed ? ""
     : stopping ? "Waiting for an active operation to finish. A capture already sent to the camera may still complete."
     : active ? ""
     : reasons[report.stop_reason] || "This session has ended. Your files are saved locally.");
@@ -370,21 +388,23 @@ $("image-viewer").addEventListener("click", (event) => {
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) event.target.close();
   }
 });
-for (const button of document.querySelectorAll("[data-example]")) button.addEventListener("click", () => {
-  $("instruction").value = examples[button.dataset.example];
-  $("instruction").focus();
-});
-
 async function poll() {
   const generation = commandGeneration;
   try {
     const next = await api("/api/state");
-    if (!connected) notice("");
+    if (connectionProblemReported) { connectionProblemReported = false; notice(""); }
     // Do not let an older polling response replace a just-completed command.
-    if (!pending && generation === commandGeneration) accept(next);
+    if (!pending && generation === commandGeneration) {
+      accept(next);
+      if (!checkedOnLoad) {
+        checkedOnLoad = true;
+        if (!next.operation && !next.session_id) await command("/api/check");
+      }
+    }
   } catch {
     connected = false;
-    notice("Cannot reach the local server. Keep ui.py running. Monitoring may still be active; the page will reconnect automatically.");
+    if (!connectionProblemReported) notice("Cannot reach the local server. Keep ui.py running. Monitoring may still be active; the page will reconnect automatically.");
+    connectionProblemReported = true;
     render();
   } finally { setTimeout(poll, 1000); }
 }

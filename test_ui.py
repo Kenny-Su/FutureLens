@@ -45,6 +45,7 @@ class InterfaceTests(unittest.TestCase):
 
     def test_ui_settings_drive_real_engine_and_saved_photo_report(self):
         clock = Clock()
+        self.manager.camera_check = {"error": "Earlier connection check failed"}
         waiting = threading.Event()
         from waitless import write_json
         def publish(path, report):
@@ -69,6 +70,7 @@ class InterfaceTests(unittest.TestCase):
             self.assertFalse(self.manager.worker.is_alive())
         state = self.manager.state()
         self.assertIsNone(state["error"])
+        self.assertIsNone(state["camera_check"])
         report = state["report"]
         self.assertEqual(report["current_interval_s"], 60)
         self.assertEqual(report["settings"], {"cooldown": 5, "max_frame_age": 30})
@@ -114,6 +116,19 @@ class InterfaceTests(unittest.TestCase):
             camera.return_value.__exit__.assert_called_once()
         self.assertEqual(self.manager.camera_check["model"], "Test Sony")
         self.assertTrue((self.manager.check_output / "preview.jpg").exists())
+
+    def test_start_configuration_errors_do_not_launch_camera_work(self):
+        with patch("ui.load_config", return_value=ApiConfig()), patch("ui.run_session") as run:
+            with self.assertRaisesRegex(ValueError, "ANTHROPIC_API_KEY"):
+                self.manager.start({"request": "scene"})
+            run.assert_not_called()
+        self.helper.unlink()
+        with patch("ui.run_session") as run:
+            with self.assertRaisesRegex(ValueError, "runtime is missing"):
+                self.manager.start({"request": "scene"})
+            run.assert_not_called()
+        self.assertIsNone(self.manager.operation)
+        self.assertIsNone(self.manager.output)
 
     def test_failures_release_session_and_do_not_expose_credentials(self):
         with patch("ui.run_session", side_effect=RuntimeError("Camera unavailable")):
