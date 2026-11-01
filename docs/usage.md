@@ -160,7 +160,10 @@ are controlled in the browser.
    clarification. A failed reply can be retried without losing the exchange.
    **Refresh preview** acquires a new reference, preserves the conversation and
    agreed constraints, and refreshes any illustrative highlights for another review.
-   The conversation survives browser refreshes. The camera is released during review.
+   The conversation survives browser refreshes. The preview-only camera connection
+   stays open during review, so a refresh fetches a new still frame without reconnecting.
+   There is no live feed or background frame sampling. The connection closes before
+   monitoring takes ownership, on a preview error, or when the server exits.
    **Start over** clears the current discussion so you can describe a different moment.
    **Approve and start** commits the displayed interpretation and begins monitoring
    from a fresh frame. Approval is mandatory for every session. The boxes align the

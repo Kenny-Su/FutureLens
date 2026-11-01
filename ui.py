@@ -1,6 +1,7 @@
 """Serve the WaitLess camera interface locally, without a frontend build step."""
 
 import argparse
+from contextlib import ExitStack
 from copy import deepcopy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,8 @@ class SessionManager:
         self.intent = None
         self.intent_output = None
         self.intent_generation = 0
+        self.preview_camera = None
+        self.preview_context = ExitStack()
         self.token = secrets.token_urlsafe(32)
 
     def _folder(self, prefix):
@@ -79,6 +82,7 @@ class SessionManager:
 
     def _monitor(self, settings, approved):
         try:
+            self._close_preview()
             run_session(settings, self.output, approved_intent=approved,
                         camera_helper=self.helper, stop_event=self.stop_event)
         except Exception as exc:
@@ -173,9 +177,9 @@ class SessionManager:
         folder = self.intent_output
         try:
             if fresh:
-                with SonyCamera(folder / "moments", helper=self.helper, enable_capture=False) as camera:
-                    image = model_image(camera.latest_frame().image)
-                    draft.update(camera_model=camera.model, camera_capabilities=camera.capabilities)
+                frame, model, capabilities = self._preview_frame(folder)
+                image = model_image(frame.image)
+                draft.update(camera_model=model, camera_capabilities=capabilities)
                 image.save(folder / "reference.jpg", quality=95, subsampling=0)
                 draft.update(width=image.width, height=image.height,
                              reference_at=datetime.now(timezone.utc).isoformat(),
@@ -208,6 +212,22 @@ class SessionManager:
                 finally:
                     self.operation = None
 
+    def _preview_frame(self, folder):
+        # Camera operations share one worker; retain the connection, not a frame queue.
+        try:
+            if self.preview_camera is None:
+                self.preview_camera = self.preview_context.enter_context(
+                    SonyCamera(folder / "moments", helper=self.helper, enable_capture=False))
+            camera = self.preview_camera
+            return camera.latest_frame(), camera.model, deepcopy(camera.capabilities)
+        except Exception:
+            self._close_preview()
+            raise
+
+    def _close_preview(self):
+        self.preview_camera = None
+        self.preview_context.close()
+
     def check_camera(self):
         with self.lock:
             if self.operation is not None:
@@ -220,10 +240,10 @@ class SessionManager:
         result = {}
         try:
             self.check_output.mkdir(parents=True)
-            with SonyCamera(self.check_output / "moments", helper=self.helper) as camera:
-                result.update(model=camera.model, capabilities=camera.capabilities)
-                camera.latest_frame().image.save(self.check_output / "preview.jpg", quality=95)
-                result["preview"] = f"/media/{self.check_output.name}/preview.jpg"
+            frame, model, capabilities = self._preview_frame(self.check_output)
+            result.update(model=model, capabilities=capabilities)
+            frame.image.save(self.check_output / "preview.jpg", quality=95)
+            result["preview"] = f"/media/{self.check_output.name}/preview.jpg"
         except Exception as exc:
             result["error"] = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
         finally:
@@ -242,6 +262,7 @@ class SessionManager:
             self.intent_generation += 1
         if self.worker:
             self.worker.join()
+        self._close_preview()
 
     def _report(self):
         if self.output is None:

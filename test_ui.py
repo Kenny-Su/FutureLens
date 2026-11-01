@@ -109,19 +109,73 @@ class InterfaceTests(unittest.TestCase):
         self.assertIsNone(self.manager.operation)
         self.assertIsNone(self.manager.error)
 
-    def test_camera_check_never_enables_capture_and_releases_camera(self):
+    def test_repeated_previews_reuse_connection_without_enabling_capture(self):
         with patch("ui.SonyCamera") as camera:
             device = camera.return_value.__enter__.return_value
             device.model = "Test Sony"
             device.capabilities = {"capture_ready": True}
             device.latest_frame.return_value.image = Image.new("RGB", (32, 32))
             self.manager.check_camera()
+            self.manager.worker.join(2)
+            first_preview = self.manager.camera_check["preview"]
+            camera.return_value.__exit__.assert_not_called()
+            self.manager.check_camera()
+            self.manager.worker.join(2)
+            self.assertNotEqual(self.manager.camera_check["preview"], first_preview)
+            camera.assert_called_once()
+            self.assertEqual(device.latest_frame.call_count, 2)
             self.manager.close()
-            self.assertNotIn("enable_capture", camera.call_args.kwargs)
+            self.assertFalse(camera.call_args.kwargs["enable_capture"])
             device.capture.assert_not_called()
             camera.return_value.__exit__.assert_called_once()
         self.assertEqual(self.manager.camera_check["model"], "Test Sony")
         self.assertTrue((self.manager.check_output / "preview.jpg").exists())
+
+    def test_monitoring_closes_preview_connection_before_acquiring_camera(self):
+        with patch("ui.SonyCamera") as camera:
+            device = camera.return_value.__enter__.return_value
+            device.model, device.capabilities = "Test Sony", {"capture_ready": True}
+            device.latest_frame.return_value.image = Image.new("RGB", (32, 32))
+            self.manager.check_camera()
+            self.manager.worker.join(2)
+            identity = self.start_data()
+            with self.assertRaises(ValueError):
+                self.manager.start({**identity, "revision": 0})
+            camera.return_value.__exit__.assert_not_called()
+
+            def monitor(*args, **kwargs):
+                camera.return_value.__exit__.assert_called_once()
+                self.assertIsNone(self.manager.preview_camera)
+                device.capture.assert_not_called()
+
+            with patch("ui.run_session", side_effect=monitor) as run:
+                self.manager.start(identity)
+                self.manager.worker.join(2)
+                run.assert_called_once()
+            self.assertIsNone(self.manager.error)
+            self.manager.close()
+            camera.return_value.__exit__.assert_called_once()
+
+    def test_failed_preview_discards_connection_and_next_request_reconnects(self):
+        with patch("ui.SonyCamera") as camera:
+            device = camera.return_value.__enter__.return_value
+            device.model, device.capabilities = "Test Sony", {"capture_ready": True}
+            device.latest_frame.return_value.image = Image.new("RGB", (32, 32))
+            self.manager.check_camera()
+            self.manager.worker.join(2)
+            device.latest_frame.side_effect = RuntimeError("Camera disconnected")
+            self.manager.check_camera()
+            self.manager.worker.join(2)
+            self.assertEqual(self.manager.camera_check["error"], "Camera disconnected")
+            self.assertIsNone(self.manager.preview_camera)
+            camera.return_value.__exit__.assert_called_once()
+            camera.assert_called_once()
+            device.latest_frame.side_effect = None
+            self.manager.check_camera()
+            self.manager.worker.join(2)
+            self.assertEqual(camera.call_count, 2)
+            self.assertNotIn("error", self.manager.camera_check)
+            device.capture.assert_not_called()
 
     def test_start_configuration_errors_do_not_launch_camera_work(self):
         with patch("ui.load_config", return_value=ApiConfig()), patch("ui.run_session") as run:
@@ -145,20 +199,24 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(state["error"], "Camera unavailable")
         self.assertNotIn("test-only-secret", json.dumps(state))
 
-    def test_review_preparation_releases_preview_only_camera_before_inference(self):
+    def test_review_reuses_preview_only_connection_and_holds_it_during_alignment(self):
         with patch("ui.SonyCamera") as camera, patch("ui.review_intent") as propose:
             device = camera.return_value.__enter__.return_value
             device.model = "Test Sony"
             device.capabilities = {"capture_ready": True}
             device.latest_frame.return_value.image = Image.new("RGB", (1920, 1080))
             def interpretation(*args, **kwargs):
-                camera.return_value.__exit__.assert_called_once()
+                camera.return_value.__exit__.assert_not_called()
                 device.capture.assert_not_called()
                 self.assertFalse(camera.call_args.kwargs["enable_capture"])
                 return {**plan(), **review_reply()}
             propose.side_effect = interpretation
+            self.manager.check_camera()
+            self.manager.worker.join(2)
             self.manager.prepare_intent({"request": "The smaller peak"})
             self.manager.worker.join(2)
+            camera.assert_called_once()
+            self.assertEqual(device.latest_frame.call_count, 2)
         state = self.manager.state()
         self.assertEqual(state["intent"]["status"], "ready")
         self.assertIsNone(state["session_id"])
