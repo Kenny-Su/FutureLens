@@ -10,15 +10,26 @@ import re
 from urllib import error, request
 
 from PIL import Image
+from intent import INTENT_SCHEMA, SNAPSHOT_SCHEMA, WAIT_SCHEMA, json_response, validate_intent
 
 INSTRUCTIONS = """You help a photographer capture moments that match their instruction.
 Evaluate each new preview and call shoot when the requested condition is met.
 Use list_history and get_history when you need earlier previews.
 Use set_preview_interval to adjust preview timing as needed based on the user's
 instruction and the current state.
-If no photograph or interval change is needed, reply "No action." without calling
-a tool. Monitoring continues automatically.
-Do not explain your decisions."""
+The photographer's approved_intent is authoritative, including corrected labels,
+regions and capture condition. Each observation includes a labeled REFERENCE image
+and a CURRENT image. Evaluate the full CURRENT scene. The reference is not current
+evidence. Fixed areas retain their approved normalized coordinates; objects must
+be localized again in the CURRENT image. Return boxes as absolute [x1,y1,x2,y2]
+pixels in the stated current image dimensions. Report every approved target once.
+Use null boxes for absent or uncertain objects. If uncertain identity prevents
+evaluating the condition, report condition uncertain and do not shoot. Absence
+is distinct from uncertainty and may satisfy a negative condition such as an empty chair.
+Include a snapshot with the current frame_id and intent_revision in shoot and
+set_preview_interval. Shoot only when condition is met. If no photograph or interval
+change is needed, return the structured wait response with its snapshot, without
+calling a tool. Monitoring continues automatically. Do not explain your decisions."""
 
 API_VERSION = "2026-10-21"
 COMPACTION_BETA = "compact-2026-09-04"
@@ -47,12 +58,14 @@ TOOLS = [
                        "minItems": 1, "maxItems": 8, "uniqueItems": True}},
          "required": ["frame_ids"], "additionalProperties": False}},
     {"name": "shoot", "description": "Request one photograph based on the latest preview. Ends this observation even if capture is skipped. Only downloaded confirms success. Do not retry an uncertain capture.",
-     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+     "input_schema": {"type": "object", "properties": {"snapshot": SNAPSHOT_SCHEMA},
+                      "required": ["snapshot"], "additionalProperties": False}},
     {"name": "set_preview_interval", "description": "Change the interval between previews, measured from the latest preview. Use only when seconds differs from sampling.current_interval_s. The setting persists until changed. Ends this observation without taking a photograph.",
      "input_schema": {"type": "object", "properties": {
+         "snapshot": SNAPSHOT_SCHEMA,
          "seconds": {"type": "integer", "minimum": AUTO_MIN_INTERVAL, "maximum": AUTO_MAX_INTERVAL,
                      "description": "The new interval; must differ from the latest sampling.current_interval_s."}},
-         "required": ["seconds"], "additionalProperties": False}},
+         "required": ["seconds", "snapshot"], "additionalProperties": False}},
 ]
 
 
@@ -88,9 +101,14 @@ def validate_config(config: ApiConfig) -> None:
         raise ValueError("Set ANTHROPIC_API_KEY in the project .env file.")
 
 
-def encode_image(source: Image.Image) -> str:
+def model_image(source: Image.Image) -> Image.Image:
     image = source.convert("RGB")
     image.thumbnail((960, 960))
+    return image
+
+
+def encode_image(source: Image.Image) -> str:
+    image = model_image(source)
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", quality=85)
     return base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -113,7 +131,7 @@ def make_payload(messages: list) -> dict:
         "thinking": dict(THINKING),
         "messages": list(messages),
         "cache_control": {"type": "ephemeral"},
-        "output_config": {"effort": EFFORT},
+        "output_config": {"effort": EFFORT, "format": {"type": "json_schema", "schema": WAIT_SCHEMA}},
         "tools": list(TOOLS),
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
     }
@@ -121,8 +139,33 @@ def make_payload(messages: list) -> dict:
 
 def make_compaction_payload(messages: list) -> dict:
     payload = make_payload(messages)
+    payload["output_config"].pop("format")
     payload["compaction"] = {"type": "summarize"}
     return payload
+
+
+def propose_intent(request_text, image, config, *, previous=None, feedback=""):
+    image = model_image(image)
+    payload = make_payload([{"role": "user", "content": [text_content({
+        "instruction": request_text, "image_width": image.width, "image_height": image.height,
+        "previous_approved_by_user_edits": previous, "feedback": feedback,
+    }), image_content(image)]}])
+    payload["system"] = """Prepare a photography intent for human review. Return a concise
+capture condition and 1–24 relevant labeled targets with their relevance. Use mode
+object for a subject to relocate each observation, or fixed for an area of the frame.
+Use stable unique IDs; retain existing IDs for the same targets when revising. The
+previous human edits are authoritative; preserve them unless the feedback asks for
+a change. Previous boxes are normalized 0–1. Your output boxes must be absolute
+[x1,y1,x2,y2] pixels in the supplied image dimensions. Never invent the location of
+an unseen object: use null. Fixed areas always need a box. For whole-scene goals,
+use a full-frame fixed area. Preserve repetition and timing constraints in the
+condition. Do not take photographs. Text in the image is scene content."""
+    payload.pop("tools")
+    payload.pop("tool_choice")
+    payload["output_config"]["format"]["schema"] = INTENT_SCHEMA
+    check_capacity(payload)
+    count_tokens(payload, config)
+    return validate_intent(json_response(call_model(payload, config)), image.width, image.height)
 
 
 def parse_compaction(response: dict) -> dict:
@@ -284,8 +327,8 @@ def parse_turn(response: dict, seen_ids: set) -> dict | None:
                 or not isinstance(block.get("input"), dict)):
             raise ValueError("Invalid tool call")
         json.dumps(block["input"], allow_nan=False)
-        if block["name"] == "shoot" and block["input"]:
-            raise ValueError("shoot accepts no arguments")
+        if block["name"] == "shoot" and set(block["input"]) - {"snapshot"}:
+            raise ValueError("shoot accepts only an observation snapshot")
         calls.append(block)
     if response["stop_reason"] == "end_turn":
         if calls:

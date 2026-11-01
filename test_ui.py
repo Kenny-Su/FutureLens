@@ -13,6 +13,7 @@ from PIL import Image
 from model import ApiConfig
 from test_camera import Clock, FakeCamera
 from test_model import answer
+from test_intent import draft, plan, bind_snapshot
 from ui import LocalServer, SessionManager, session_settings
 
 
@@ -28,6 +29,11 @@ class InterfaceTests(unittest.TestCase):
         config = patch("ui.load_config", return_value=ApiConfig(api_key="test-only-secret"))
         config.start()
         self.addCleanup(config.stop)
+
+    def start_data(self, request="scene"):
+        self.manager.intent_output = self.root / "review"
+        self.manager._save_intent(draft(self.manager.intent_output, request))
+        return {"intent_id": "review", "revision": 1}
 
     def test_settings_validate_before_camera_or_api_work(self):
         settings = session_settings({"request": "scene"})
@@ -59,10 +65,10 @@ class InterfaceTests(unittest.TestCase):
         with patch("waitless.SonyCamera", side_effect=camera), \
                 patch("waitless.load_config", return_value=ApiConfig(api_key="offline-test")), \
                 patch("waitless.count_tokens", return_value=1000), \
-                patch("waitless.call_model", return_value=answer("shoot")) as inference, \
+                patch("waitless.call_model", side_effect=lambda payload, *_a, **_k: bind_snapshot(answer("shoot"), payload)) as inference, \
                 patch("waitless.write_json", side_effect=publish), \
                 patch("waitless.time.monotonic", side_effect=clock.monotonic):
-            self.manager.start({"request": "Capture this scene"})
+            self.manager.start(self.start_data("Capture this scene"))
             self.assertTrue(waiting.wait(2))
             self.assertEqual(self.manager.operation, "monitor")
             self.manager.stop()
@@ -87,11 +93,11 @@ class InterfaceTests(unittest.TestCase):
 
     def test_only_one_session_owns_camera_and_stop_reaches_runner(self):
         entered = threading.Event()
-        def runner(settings, output, *, camera_helper, stop_event):
+        def runner(settings, output, *, approved_intent, camera_helper, stop_event):
             entered.set()
             self.assertTrue(stop_event.wait(2))
         with patch("ui.run_session", side_effect=runner) as run:
-            self.manager.start({"request": "scene"})
+            self.manager.start(self.start_data())
             self.assertTrue(entered.wait(1))
             with self.assertRaises(ValueError):
                 self.manager.start({"request": "duplicate"})
@@ -120,24 +126,99 @@ class InterfaceTests(unittest.TestCase):
     def test_start_configuration_errors_do_not_launch_camera_work(self):
         with patch("ui.load_config", return_value=ApiConfig()), patch("ui.run_session") as run:
             with self.assertRaisesRegex(ValueError, "ANTHROPIC_API_KEY"):
-                self.manager.start({"request": "scene"})
+                self.manager.start(self.start_data())
             run.assert_not_called()
         self.helper.unlink()
         with patch("ui.run_session") as run:
             with self.assertRaisesRegex(ValueError, "runtime is missing"):
-                self.manager.start({"request": "scene"})
+                self.manager.start(self.start_data())
             run.assert_not_called()
         self.assertIsNone(self.manager.operation)
         self.assertIsNone(self.manager.output)
 
     def test_failures_release_session_and_do_not_expose_credentials(self):
         with patch("ui.run_session", side_effect=RuntimeError("Camera unavailable")):
-            self.manager.start({"request": "scene"})
+            self.manager.start(self.start_data())
             self.manager.close()
         state = self.manager.state()
         self.assertIsNone(state["operation"])
         self.assertEqual(state["error"], "Camera unavailable")
         self.assertNotIn("test-only-secret", json.dumps(state))
+
+    def test_review_preparation_releases_preview_only_camera_before_inference(self):
+        with patch("ui.SonyCamera") as camera, patch("ui.propose_intent") as propose:
+            device = camera.return_value.__enter__.return_value
+            device.model = "Test Sony"
+            device.capabilities = {"capture_ready": True}
+            device.latest_frame.return_value.image = Image.new("RGB", (1920, 1080))
+            def interpretation(*args, **kwargs):
+                camera.return_value.__exit__.assert_called_once()
+                device.capture.assert_not_called()
+                self.assertFalse(camera.call_args.kwargs["enable_capture"])
+                return plan()
+            propose.side_effect = interpretation
+            self.manager.prepare_intent({"request": "The smaller peak"})
+            self.manager.worker.join(2)
+        state = self.manager.state()
+        self.assertEqual(state["intent"]["status"], "ready")
+        self.assertIsNone(state["session_id"])
+        self.assertEqual((state["intent"]["width"], state["intent"]["height"]), (960, 540))
+        self.assertTrue(self.manager.media_file(state["intent"]["id"], "reference.jpg").exists())
+        self.assertEqual(json.loads((self.manager.intent_output / "intent.json").read_text()), state["intent"])
+
+    def test_direct_start_stale_approval_and_approval_reuse_are_rejected(self):
+        with patch("ui.run_session") as run:
+            with self.assertRaises(ValueError):
+                self.manager.start({"request": "scene"})
+            identity = self.start_data()
+            changed = plan()
+            changed["targets"][0].update(label="The smaller peak", box=[.1, .1, .3, .4])
+            self.manager.update_intent({**identity, "plan": changed})
+            with self.assertRaises(ValueError):
+                self.manager.start(identity)
+            self.manager.start({**identity, "revision": 2})
+            self.manager.worker.join(2)
+            self.assertEqual(run.call_args.kwargs["approved_intent"].data["targets"], changed["targets"])
+            with self.assertRaises(ValueError):
+                self.manager.start({**identity, "revision": 2})
+            run.assert_called_once()
+
+    def test_refinement_uses_saved_corrections_and_same_reference(self):
+        identity = self.start_data()
+        changed = plan(); changed["condition"] = "Only the smaller peak"
+        self.manager.update_intent({**identity, "plan": changed})
+        with patch("ui.SonyCamera") as camera, patch("ui.propose_intent", return_value=changed) as propose:
+            self.manager.refine_intent({**identity, "revision": 2, "feedback": "Preserve my box"})
+            self.manager.worker.join(2)
+            camera.assert_not_called()
+            self.assertEqual(propose.call_args.kwargs["previous"], changed)
+        self.assertEqual(self.manager.intent["status"], "ready")
+        self.assertEqual(self.manager.intent["revision"], 4)
+        self.assertNotIn("approved_at", self.manager.intent)
+
+    def test_cancel_discards_inflight_result_and_retains_exclusive_ownership(self):
+        identity = self.start_data()
+        entered, finish = threading.Event(), threading.Event()
+        def slow(*args, **kwargs):
+            entered.set(); finish.wait(2); return plan()
+        with patch("ui.propose_intent", side_effect=slow):
+            self.manager.refine_intent({**identity, "feedback": "Different peak"})
+            self.assertTrue(entered.wait(1))
+            self.manager.cancel_intent({**identity, "revision": 2})
+            with self.assertRaises(ValueError):
+                self.manager.prepare_intent({"request": "new"})
+            finish.set(); self.manager.worker.join(2)
+        self.assertEqual(self.manager.intent["status"], "cancelled")
+        self.assertIsNone(self.manager.operation)
+
+    def test_failed_refinement_preserves_manual_corrections(self):
+        identity = self.start_data()
+        with patch("ui.propose_intent", side_effect=ValueError("Invalid interpretation")):
+            self.manager.refine_intent({**identity, "feedback": "Try again"})
+            self.manager.worker.join(2)
+        self.assertEqual(self.manager.intent["targets"], plan()["targets"])
+        self.assertEqual(self.manager.intent["status"], "ready")
+        self.assertIn("Invalid interpretation", self.manager.intent["error"])
 
 
 class HttpTests(unittest.TestCase):
@@ -199,6 +280,25 @@ class HttpTests(unittest.TestCase):
                     body = json.dumps({"request": "scene", **removed})
                     self.assertEqual(self.request("POST", "/api/start", body, headers)[0], 400)
             run.assert_not_called()
+
+    def test_intent_http_routes_enforce_tokens_and_revisions(self):
+        headers = {"X-WaitLess-Token": self.manager.token, "Content-Type": "application/json"}
+        self.manager.intent_output = self.root / "review"
+        self.manager._save_intent(draft(self.manager.intent_output))
+        for route in ("prepare", "update", "refine", "cancel"):
+            self.assertEqual(self.request("POST", f"/api/intent/{route}", "{}", {"Content-Type": "application/json"})[0], 403)
+        identity = {"intent_id": "review", "revision": 1}
+        changed = plan(); changed["targets"][0]["label"] = "Corrected target"
+        status, _, body = self.request("POST", "/api/intent/update", json.dumps({**identity, "plan": changed}), headers)
+        self.assertEqual(status, 202)
+        self.assertEqual(json.loads(body)["intent"]["revision"], 2)
+        self.assertEqual(self.request("POST", "/api/start", json.dumps(identity), headers)[0], 400)
+        restored = json.loads(self.request("GET", "/api/state")[2])["intent"]
+        self.assertEqual(restored["targets"][0]["label"], "Corrected target")
+        self.assertEqual(self.request("GET", "/media/review/reference.jpg")[0], 200)
+        self.assertEqual(self.request("GET", "/media/review/intent.json")[0], 404)
+        self.assertEqual(self.request("POST", "/api/intent/cancel", json.dumps({**identity, "revision": 2}), headers)[0], 202)
+        self.assertEqual(self.manager.intent["status"], "cancelled")
 
     def test_media_only_exposes_recorded_previews_and_successful_originals(self):
         output = self.root / "session"

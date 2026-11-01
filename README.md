@@ -34,10 +34,12 @@ time. WaitLess separates observation from capture:
 
 1. **Describe your moment.** Use a plain-language instruction about the subject,
    visibility, or light you want.
-2. **Let WaitLess watch.** Preview timing is automatic. Claude chooses when to
+2. **Review what matters.** Inspect the agent’s capture condition and highlighted
+   targets. Correct boxes or descriptions, then approve monitoring.
+3. **Let WaitLess watch.** Preview timing is automatic. Claude chooses when to
    inspect the next live-view preview: less often while the mountain stays hidden,
    more often as clouds clear. It can compare earlier previews to assess change.
-3. **Capture when it matches.** When Claude identifies the requested condition,
+4. **Capture when it matches.** When Claude identifies the requested condition,
    WaitLess asks the camera to take a photograph and downloads its original files.
    You choose exposure and image format on the camera.
 

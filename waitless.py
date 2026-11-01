@@ -5,18 +5,20 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
+import shutil
 import time
 from urllib.parse import urlsplit
 
 from camera import SonyCamera, CameraError, DEFAULT_HELPER
 from agent import (SessionAgent, COMPACT_INPUT_TOKENS, COMPACT_REQUEST_BYTES, COMPACT_IMAGES,
                    KEEP_OBSERVATIONS, COMPACTION_RETRY_SECONDS)
-from history import PreviewArchive, AgentJournal, capture_outcome, append_json
+from history import Preview, PreviewArchive, AgentJournal, capture_outcome, append_json
+from intent import ApprovedIntent, json_response, validate_snapshot
 from model import (API_ENDPOINT, INSTRUCTIONS, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES, MAX_INPUT_TOKENS,
                    ApiError, CapacityReached, call_model, check_capacity, count_tokens, image_content,
                    load_config, parse_compaction, response_usage, text_content, validate_config, MAX_CALLS_PER_OBSERVATION,
                    AUTO_MIN_INTERVAL, AUTO_MAX_INTERVAL, AUTO_INITIAL_INTERVAL,
-                   EFFORT, THINKING, MAX_OUTPUT_TOKENS)
+                   EFFORT, THINKING, MAX_OUTPUT_TOKENS, model_image)
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,9 @@ class Monitor:
         self.last_capture = -math.inf
         self.latest_capture_outcome = self.last_downloaded_capture = None
         self.agent = SessionAgent(output)
+        self.intent = report["intent"]
+        self.reference = Preview(-1, 0, 0, -1, output / "intent-reference.jpg",
+                                 self.intent["width"], self.intent["height"])
 
     def publish(self):
         write_json(self.output / "results.json", self.report)
@@ -77,6 +82,9 @@ class Monitor:
         statuses = {"user_stop": "skipped_user_stop", "stale_preview": "skipped_stale_frame"}
         if reason:
             entry["capture_status"] = statuses[reason]
+        elif entry["annotations"]["condition"] != "met":
+            entry["capture_status"] = ("skipped_intent_uncertain" if entry["annotations"]["condition"] == "uncertain"
+                                       else "skipped_condition_unmet")
         elif time.monotonic() - self.last_capture < self.settings.cooldown:
             entry["capture_status"] = "skipped_cooldown"
         else:
@@ -140,8 +148,15 @@ class Monitor:
                                 "max_interval_s": AUTO_MAX_INTERVAL},
                    "latest_capture_outcome": self.latest_capture_outcome,
                    "last_downloaded_capture": self.last_downloaded_capture}
-        message = {"role": "user", "content": [text_content(initial), image_content(preview.image())]}
-        self.append_message(message, journal, [preview])
+        current_image = model_image(preview.image())
+        initial.update(approved_intent=self.intent, current_image_width=current_image.width,
+                       current_image_height=current_image.height, intent_revision=self.intent["revision"])
+        message = {"role": "user", "content": [text_content(initial),
+            text_content({"image": "REFERENCE", "captured_at": self.intent["reference_at"]}),
+            image_content(self.reference.image()), text_content({"image": "CURRENT", "frame_id": preview.id}),
+            image_content(current_image)]}
+        entry.update(annotations=None, annotations_status="pending")
+        self.append_message(message, journal, [self.reference, preview])
         journal.event("run", "started", "run", outcome="saved")
         try:
             for turn in range(1, MAX_CALLS_PER_OBSERVATION + 1):
@@ -184,6 +199,25 @@ class Monitor:
                 journal.message(message)
                 journal.event("model", "completed", action_id, turn=turn, latency_s=time.monotonic() - before)
                 active = None
+                if call is None or call["name"] in ("shoot", "set_preview_interval"):
+                    try:
+                        if call is None:
+                            end = json_response(response)
+                            if not isinstance(end, dict) or set(end) != {"action", "snapshot"} or end["action"] != "wait":
+                                raise ValueError("Missing wait observation snapshot.")
+                            snapshot = end["snapshot"]
+                        else:
+                            snapshot = call["input"].get("snapshot")
+                        entry["annotations"] = validate_snapshot(snapshot, self.intent, preview.id, current_image.size)
+                        entry["annotations_status"] = "available"
+                        self.publish()
+                    except ValueError as exc:
+                        entry.update(annotations=None, annotations_status="unavailable", annotation_error=str(exc))
+                        if call:
+                            self.append_message({"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"],
+                                "is_error": True, "content": [text_content({"error": str(exc), "executed": False})]}]}, journal)
+                        outcome = "invalid_annotations"
+                        break
                 if call is None:
                     outcome = self.expired(preview) or "no_photo"
                     break
@@ -213,7 +247,7 @@ class Monitor:
                     try:
                         if name == "set_preview_interval":
                             seconds = arguments.get("seconds")
-                            if (set(arguments) != {"seconds"} or type(seconds) is not int
+                            if (set(arguments) != {"seconds", "snapshot"} or type(seconds) is not int
                                     or not AUTO_MIN_INTERVAL <= seconds <= AUTO_MAX_INTERVAL):
                                 raise ValueError(f"Use only integer seconds from {AUTO_MIN_INTERVAL} to {AUTO_MAX_INTERVAL}.")
                             result = {"previous_seconds": self.report["current_interval_s"],
@@ -222,7 +256,7 @@ class Monitor:
                                 result.update(changed=False, message=(
                                     f"Interval unchanged at {seconds} seconds. "
                                     "Observation ended; monitoring continues automatically. "
-                                    "Reply No action. when no change or photograph is needed."))
+                                    "Return a wait snapshot when no change or photograph is needed."))
                             else:
                                 entry["next_preview_interval_s"] = seconds
                                 self.report.update(current_interval_s=seconds, last_interval_change=result)
@@ -251,6 +285,8 @@ class Monitor:
                 unchanged_interval = name == "set_preview_interval" and summary.get("changed") is False
                 journal.event("tool", "failed" if is_error else "skipped" if unchanged_interval else "completed",
                               "tool:" + call_id, name=name, **summary)
+                if is_error and name == "set_preview_interval":
+                    entry.update(annotations=None, annotations_status="pending")
                 active = None
                 if name == "shoot":
                     outcome = entry["capture_status"]
@@ -276,6 +312,8 @@ class Monitor:
             raise
         finally:
             outcome = outcome or "error"
+            if entry.get("annotations_status") == "pending" or outcome in ("run_limit", "error", "invalid_annotations"):
+                entry.update(annotations=None, annotations_status="unavailable")
             if active:
                 journal.event(active[0], "skipped", active[1], reason=outcome)
             if entry["run_status"] != "failed":
@@ -402,15 +440,21 @@ class Monitor:
         return self.output
 
 
-def run_session(settings: SessionSettings, output: Path, *, camera_helper=DEFAULT_HELPER, stop_event=None) -> Path:
+def run_session(settings: SessionSettings, output: Path, *, approved_intent: ApprovedIntent,
+                camera_helper=DEFAULT_HELPER, stop_event=None) -> Path:
+    if not isinstance(approved_intent, ApprovedIntent) or approved_intent.data["request"] != settings.request:
+        raise ValueError("A matching approved intent is required before monitoring.")
     config = load_config()
     validate_config(config)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     (output / "moments").mkdir()
+    shutil.copyfile(approved_intent.reference_path, output / "intent-reference.jpg")
+    write_json(output / "intent.json", approved_intent.data)
     report = {
         "status": "running", "phase": "connecting", "mode": "sony_usb",
         "provider": "anthropic", "model": MODEL,
+        "intent": approved_intent.data,
         "model_settings": {"effort": EFFORT, "thinking": THINKING["type"],
                            "thinking_display": THINKING["display"], "max_output_tokens": MAX_OUTPUT_TOKENS,
                            "automatic_prompt_caching": True},

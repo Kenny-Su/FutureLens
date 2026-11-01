@@ -14,6 +14,7 @@ from camera import CameraError, CameraFrame, SonyCamera
 import waitless as fl
 import model
 from test_model import answer, compacted, tool
+from test_intent import approval, bind_snapshot, snapshot
 
 
 class Clock:
@@ -108,8 +109,8 @@ class CameraWorkflowTests(unittest.TestCase):
             reply = next(self.replies)
             if isinstance(reply, BaseException):
                 raise reply
-            return reply
-        return answer("wait") if self.action == "wait" else tool(self.action, call_id=f"call-{len(self.requests)}")
+            return bind_snapshot(reply, payload)
+        return bind_snapshot(answer("wait") if self.action == "wait" else tool(self.action, call_id=f"call-{len(self.requests)}"), payload)
 
     def settings(self, *, stop_after_calls=3, stop_after_observations=None, **overrides):
         # Test-only stop controls: production sessions have no counters or deadlines that end them.
@@ -121,8 +122,9 @@ class CameraWorkflowTests(unittest.TestCase):
         })
 
     def run_session(self, settings, output, *, stop_event=None):
+        approved = getattr(self, "approved", None) or approval(self.output.parent / "review", settings.request)
         if stop_event is not None:
-            return fl.run_session(settings, output, stop_event=stop_event)
+            return fl.run_session(settings, output, approved_intent=approved, stop_event=stop_event)
         stop = threading.Event()
         observe = fl.Monitor.observe
         def observe_then_stop(monitor, preview, entry):
@@ -131,7 +133,7 @@ class CameraWorkflowTests(unittest.TestCase):
                     or (self.stop_after_observations is not None and monitor.archive.count >= self.stop_after_observations)):
                 stop.set()
         with patch("waitless.Monitor.observe", observe_then_stop), patch.object(stop, "wait", side_effect=self.clock.sleep):
-            return fl.run_session(settings, output, stop_event=stop)
+            return fl.run_session(settings, output, approved_intent=approved, stop_event=stop)
 
     def report(self):
         return json.loads((self.output / "results.json").read_text())
@@ -145,6 +147,79 @@ class CameraWorkflowTests(unittest.TestCase):
     def inferences(self):
         return [payload for endpoint, payload, _ in self.requests
                 if endpoint == model.API_ENDPOINT and "compaction" not in payload]
+
+    def test_ambiguous_capture_is_deferred_and_later_observation_can_capture(self):
+        self.replies = iter([tool("shoot", {"snapshot": snapshot(condition="uncertain")}, "uncertain"),
+                             tool("shoot", call_id="recognized")])
+        self.run_session(self.settings(stop_after_calls=2), self.output)
+        first, second = self.report()["observations"]
+        self.assertEqual(first["capture_status"], "skipped_intent_uncertain")
+        self.assertEqual(second["capture_status"], "downloaded")
+        self.assertEqual(self.camera.captures, [0])
+        self.assertEqual([x["model_calls"] for x in (first, second)], [1, 1])
+
+    def test_wrong_frame_missing_and_unknown_annotations_cannot_capture(self):
+        malformed = [snapshot(99), {**snapshot(), "targets": []},
+                     {**snapshot(), "targets": [{"id": "other", "status": "visible", "box": [0, 0, 5, 5]}]}]
+        for index, value in enumerate(malformed):
+            with self.subTest(snapshot=value):
+                self.replies = iter([tool("shoot", {"snapshot": value})])
+                output = self.output / str(index)
+                self.run_session(self.settings(stop_after_calls=1), output)
+                entry = json.loads((output / "results.json").read_text())["observations"][0]
+                self.assertEqual(entry["outcome"], "invalid_annotations")
+                self.assertIsNone(entry["annotations"])
+                self.assertEqual(entry["annotations_status"], "unavailable")
+        self.assertEqual(self.camera.captures, [])
+
+    def test_no_action_without_annotations_does_not_reuse_previous_boxes(self):
+        self.replies = iter([answer("wait"), {"stop_reason": "end_turn", "content": [{"type": "text", "text": "No action."}]}])
+        self.run_session(self.settings(stop_after_calls=2), self.output)
+        first, second = self.report()["observations"]
+        self.assertEqual(first["annotations_status"], "available")
+        self.assertEqual(second["annotations_status"], "unavailable")
+        self.assertIsNone(second["annotations"])
+        self.assertEqual(self.camera.captures, [])
+
+    def test_shoot_without_a_snapshot_skips_capture_and_keeps_monitoring(self):
+        self.replies = iter([tool("shoot", {}), answer("wait")])
+        self.run_session(self.settings(stop_after_calls=2), self.output)
+        self.assertEqual(self.camera.captures, [])
+        self.assertEqual([entry["outcome"] for entry in self.report()["observations"]], ["invalid_annotations", "no_photo"])
+
+    def test_approved_corrections_and_reference_survive_compaction(self):
+        from intent import ApprovedIntent
+        from test_intent import draft
+        settings = self.settings(stop_after_calls=None, stop_after_observations=7, request="Photograph the smaller peak")
+        root = self.output.parent / "corrected"
+        data = draft(root, settings.request)
+        data["condition"] = "Only when the smaller peak on the left is visible"
+        data["targets"][0].update(label="Smaller left peak", box=[.1, .2, .4, .8])
+        self.approved = ApprovedIntent.create(data, root / "reference.jpg", "now")
+        with patch("agent.COMPACT_INPUT_TOKENS", 1):
+            self.run_session(settings, self.output)
+        self.assertGreater(self.report()["compactions_completed"], 0)
+        for payload in self.inferences():
+            content = payload["messages"][-1]["content"]
+            current = json.loads(content[0]["text"])
+            self.assertEqual(current["approved_intent"], self.approved.data)
+            self.assertEqual([b["type"] for b in content], ["text", "text", "image", "text", "image"])
+        self.assertEqual(self.report()["api_requests"] - self.report()["compaction_requests"], 7)
+
+    def test_confirmed_absence_can_capture_for_a_negative_condition(self):
+        from intent import ApprovedIntent
+        from test_intent import draft
+        settings = self.settings(stop_after_calls=1, request="Photograph the empty chair")
+        root = self.output.parent / "negative"
+        data = draft(root, settings.request)
+        data["condition"] = "The chair is empty"
+        data["targets"][0].update(label="Person in chair", mode="object", box=None)
+        self.approved = ApprovedIntent.create(data, root / "reference.jpg", "now")
+        value = snapshot(); value["targets"][0].update(status="absent", box=None)
+        self.replies = iter([tool("shoot", {"snapshot": value})])
+        self.run_session(settings, self.output)
+        self.assertEqual(self.camera.captures, [0])
+        self.assertIsNone(self.report()["observations"][0]["annotations"]["targets"][0]["box"])
 
     def test_session_settings_defaults_and_validation(self):
         settings = fl.SessionSettings(request="landscape")
@@ -164,7 +239,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.camera.frame_times, [100, 160, 220])
         payloads = self.inferences()
         self.assertEqual([len(p["messages"]) for p in payloads], [1, 3, 5])
-        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 2, 3])
+        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [2, 4, 6])
         self.assertEqual(payloads[2]["messages"][:3], payloads[1]["messages"])
         self.assertTrue(all('"user_request"' in p["messages"][0]["content"][0]["text"] for p in payloads))
         report = self.report()
@@ -232,6 +307,8 @@ class CameraWorkflowTests(unittest.TestCase):
         self.run_session(self.settings(stop_after_calls=8), self.output)
         self.assertEqual(self.camera.frame_times, [100, 400, 700])
         self.assertEqual(self.report()["observations"][1]["outcome"], "run_limit")
+        self.assertEqual(self.report()["observations"][1]["annotations_status"], "unavailable")
+        self.assertIsNone(self.report()["observations"][1]["annotations"])
         self.assertEqual([entry["next_preview_interval_s"] for entry in self.report()["observations"]], [300, 300, 300])
         self.assertEqual(self.report()["last_interval_change"]["from_frame_id"], 0)
 
@@ -247,7 +324,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(entry["next_preview_interval_s"], 60)
         result = self.tool_outcome()
         self.assertIs(result["changed"], False)
-        self.assertIn("No action.", result["message"])
+        self.assertIn("wait snapshot", result["message"])
         self.assertFalse(self.journal()[-1]["content"][0]["is_error"])
         event = [event for event in entry["events"] if event["kind"] == "tool"][-1]
         self.assertEqual(event["status"], "skipped")
@@ -276,7 +353,7 @@ class CameraWorkflowTests(unittest.TestCase):
             self.assertIs(json.loads(result["content"][0]["text"])["changed"], False)
 
     def test_auto_no_action_reply_keeps_monitoring_without_a_tool_call(self):
-        no_action = {"stop_reason": "end_turn", "content": [{"type": "text", "text": "No action."}]}
+        no_action = answer("wait")
         self.replies = iter([tool("set_preview_interval", {"seconds": 15}), no_action, no_action])
         self.run_session(self.settings(), self.output)
         report = self.report()
@@ -319,11 +396,11 @@ class CameraWorkflowTests(unittest.TestCase):
                 self.assertIn('"is_error": true', transcript)
 
     def test_auto_stale_response_cannot_change_interval(self):
-        def inference(*_, **__):
+        def inference(payload, *_, **__):
             if self.camera.frames == 1:
-                return tool("set_preview_interval", {"seconds": 120})
+                return bind_snapshot(tool("set_preview_interval", {"seconds": 120}), payload)
             self.clock.sleep(31)
-            return tool("set_preview_interval", {"seconds": 300}, "stale")
+            return bind_snapshot(tool("set_preview_interval", {"seconds": 300}, "stale"), payload)
         with patch("waitless.call_model", side_effect=inference):
             self.run_session(self.settings(stop_after_calls=2), self.output)
         self.assertEqual(self.report()["observations"][1]["outcome"], "stale_preview")
@@ -419,7 +496,7 @@ class CameraWorkflowTests(unittest.TestCase):
         self.run_session(self.settings(stop_after_calls=4), self.output)
         payloads = self.inferences()
         self.assertEqual([len(p["messages"]) for p in payloads], [1, 3, 5, 7])
-        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [1, 2, 2, 3])
+        self.assertEqual([model.check_capacity(p)["images"] for p in payloads], [2, 4, 4, 5])
         self.assertEqual(payloads[-1]["messages"][-1]["content"][0]["tool_use_id"], "get-1")
         self.assertEqual(self.camera.captures, [0])
         self.assertEqual(self.tool_outcome(1)["capture_status"], "downloaded")
@@ -473,7 +550,7 @@ class CameraWorkflowTests(unittest.TestCase):
             self.run_session(self.settings(), self.output)
         self.assertEqual(self.camera.frame_times, [100, 110])
         self.assertEqual(self.camera.captures, [])
-        self.assertEqual(self.inferences()[1]["messages"][1]["content"], reply["content"])
+        self.assertEqual(self.inferences()[1]["messages"][1]["content"], bind_snapshot(reply, self.inferences()[0])["content"])
         self.assertEqual(self.inferences()[1]["messages"][2]["content"][0]["tool_use_id"], "same")
 
     def test_history_followup_refreshes_budget_without_rewriting_prefix(self):
@@ -539,20 +616,20 @@ class CameraWorkflowTests(unittest.TestCase):
         with patch("agent.COMPACT_INPUT_TOKENS", 1):
             self.run_session(self.settings(stop_after_calls=8), self.output)
         before, after = self.inferences()[-2:]
-        self.assertEqual(model.check_capacity(before)["images"], 5)
-        self.assertEqual(model.check_capacity(after)["images"], 6)
+        self.assertEqual(model.check_capacity(before)["images"], 10)
+        self.assertEqual(model.check_capacity(after)["images"], 11)
         fetched = after["messages"][-1]["content"][0]["content"]
         self.assertEqual(json.loads(fetched[0]["text"])["frame_id"], 0)
-        self.assertEqual(fetched[1], self.inferences()[0]["messages"][0]["content"][1])
+        self.assertEqual(fetched[1], self.inferences()[0]["messages"][0]["content"][-1])
         self.assertEqual(self.report()["photos_taken"], 1)
         self.assertEqual(self.report()["context_revision"], 1)
 
     def test_compaction_failure_eventually_stops_at_hard_capacity(self):
         self.compaction_replies = iter([RuntimeError("offline"), RuntimeError("offline")])
-        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("model.MAX_IMAGES", 6):
+        with patch("agent.COMPACT_INPUT_TOKENS", 1), patch("model.MAX_IMAGES", 12):
             self.run_session(self.settings(stop_after_calls=20), self.output)
         self.assertEqual(self.report()["status"], "capacity_reached")
-        self.assertEqual(self.report()["capacity"], {"resource": "images", "used": 7, "limit": 6})
+        self.assertEqual(self.report()["capacity"], {"resource": "images", "used": 14, "limit": 12})
         self.assertEqual(len(list((self.output / "previews").glob("*.jpg"))), 7)
         self.assertEqual(self.report()["context_revision"], 0)
 
@@ -682,11 +759,11 @@ class CameraWorkflowTests(unittest.TestCase):
 
     def test_retrieved_image_capacity_preserves_the_run_and_all_previews(self):
         self.replies = iter([answer("wait"), answer("wait"), tool("get_history", {"frame_ids": [0, 1]})])
-        with patch("model.MAX_IMAGES", 4):
+        with patch("model.MAX_IMAGES", 7):
             self.run_session(self.settings(stop_after_calls=5), self.output)
         report = self.report()
         self.assertEqual(report["status"], "capacity_reached")
-        self.assertEqual(report["capacity"], {"resource": "images", "used": 5, "limit": 4})
+        self.assertEqual(report["capacity"], {"resource": "images", "used": 8, "limit": 7})
         self.assertEqual((report["previews_saved"], report["api_requests"], report["token_count_requests"]), (3, 3, 3))
         self.assertEqual(len(list((self.output / "previews").glob("*.jpg"))), 3)
         retrieved = self.journal(2)[-1]["content"][0]["content"]
@@ -806,9 +883,9 @@ class CameraWorkflowTests(unittest.TestCase):
 
     def test_ui_stop_during_inference_does_not_execute_returned_shoot(self):
         stop = threading.Event()
-        def inference(*_, **__):
+        def inference(payload, *_, **__):
             stop.set()
-            return answer("shoot")
+            return bind_snapshot(answer("shoot"), payload)
         with patch("waitless.call_model", side_effect=inference):
             self.run_session(self.settings(), self.output, stop_event=stop)
         self.assertEqual(self.camera.captures, [])

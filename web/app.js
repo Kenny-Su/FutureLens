@@ -1,16 +1,21 @@
 import { sessionActivity } from "./activity.mjs";
+import { drawOverlay, svgNode, annotationTargets, annotationText } from "./intent.mjs";
+import { IntentReview } from "./review.js";
 
 const $ = (id) => document.getElementById(id);
 const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", scheduling: "Updating preview interval…", compacting: "Organizing session context…", waiting: "Waiting for the next observation" };
 const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
 const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
-const outcomes = { no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
+const outcomes = { invalid_annotations: "Highlights unavailable · keep checking", skipped_intent_uncertain: "Target uncertain · keep checking", skipped_condition_unmet: "Capture condition not met", no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
 const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot", set_preview_interval: "Change preview interval" };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
 let checkedOnLoad = false, connectionProblemReported = false, lastCheckError = null, lastSessionError = null;
 const rows = new Map();
 const previews = new Map();
+const review = new IntentReview({request: (path, data) => { if (data !== undefined) commandGeneration++; return api(path, data); }, accept, notify: notice,
+  cancelled: () => { showingMonitor = false; render(); },
+  started: () => { showingMonitor = true; following = true; render(); window.scrollTo(0, 0); }});
 
 function text(id, value) { $(id).textContent = value; }
 function show(id, visible) { $(id).hidden = !visible; }
@@ -165,6 +170,9 @@ function openImage(id) {
   loadPreview($("viewer-image"), media(entry.preview_file));
   $("viewer-image").alt = `Observation ${id + 1} at ${clock(entry.timestamp_s)} into the session`;
   downloads($("viewer-downloads"), entry);
+  drawOverlay($("viewer-overlay"), annotationTargets(entry, state.report?.intent), entry.width, entry.height);
+  $("viewer-overlay").toggleAttribute("hidden", !$("show-highlights").checked);
+  text("viewer-annotations", annotationText(entry, state.report?.intent));
   if (!$("image-viewer").open) $("image-viewer").showModal();
 }
 function activityHeading(surface, label, item) {
@@ -189,13 +197,17 @@ function renderPreview(row, item) {
     image.alt = `Preview ${entry.frame_id + 1}`;
     image.loading = "lazy";
     loadPreview(image, media(entry.preview_file));
-    button.append(image, element("span", "saved-marker", "✓ Photo saved"));
+    button.append(image, svgNode("svg", {class: "intent-overlay", "aria-hidden": "true"}), element("span", "saved-marker", "✓ Photo saved"));
     button.addEventListener("click", () => openImage(entry.frame_id));
-    surface.append(button);
+    surface.append(button, element("p", "preview-annotations muted small"));
     row.append(surface);
   }
   row.classList.toggle("captured", captured(entry));
   row.querySelector(".saved-marker").hidden = !captured(entry);
+  const overlay = row.querySelector("svg");
+  drawOverlay(overlay, annotationTargets(entry, state.report?.intent), entry.width, entry.height);
+  overlay.toggleAttribute("hidden", !$("show-highlights").checked);
+  row.querySelector(".preview-annotations").textContent = annotationText(entry, state.report?.intent);
 }
 function renderAction(row, item) {
   if (row.dataset.revision === item.revision) return;
@@ -321,7 +333,7 @@ function renderMonitor() {
   show("stop", active);
   $("stop").disabled = stopping || pending || !connected;
   show("new-session", !active);
-  text("active-instruction", report.request || $("instruction").value);
+  text("active-instruction", report.request || state.intent?.request || $("instruction").value);
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (active ? "Connecting…" : "Not connected"));
   text("preview-count", entries.length);
@@ -355,17 +367,30 @@ function updateClock() {
 
 function render() {
   if (!state) return;
-  show("setup", !showingMonitor);
-  show("monitor", showingMonitor);
+  const reviewing = state.intent && !["approved", "cancelled"].includes(state.intent.status);
+  show("setup", !showingMonitor && !reviewing);
+  show("intent-review", Boolean(reviewing));
+  show("monitor", showingMonitor && !reviewing);
   renderSetup();
-  if (showingMonitor) renderMonitor();
+  review.render(state, connected);
+  if (showingMonitor && !reviewing) {
+    renderMonitor();
+    const intent = state.report?.intent;
+    show("highlight-control", Boolean(intent)); show("approved-intent", Boolean(intent));
+    if (intent) {
+      text("approved-condition", intent.condition);
+      $("approved-targets").replaceChildren(...intent.targets.map(t => element("li", "", `${t.label} · ${t.mode === "fixed" ? "Fixed area" : "Object"} — ${t.relevance}`)));
+    }
+    if ($("image-viewer").open && viewerFrameId !== null) openImage(viewerFrameId);
+  }
 }
 
 $("session-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
-  if (await command("/api/start", data)) { showingMonitor = true; following = true; render(); window.scrollTo(0, 0); }
+  if (await command("/api/intent/prepare", data)) { showingMonitor = false; render(); window.scrollTo(0, 0); }
 });
+$("show-highlights").addEventListener("change", () => render());
 $("check-camera").addEventListener("click", () => command("/api/check"));
 $("stop").addEventListener("click", () => command("/api/stop"));
 $("new-session").addEventListener("click", () => { showingMonitor = false; notice(""); render(); window.scrollTo(0, 0); });
@@ -394,11 +419,11 @@ async function poll() {
     const next = await api("/api/state");
     if (connectionProblemReported) { connectionProblemReported = false; notice(""); }
     // Do not let an older polling response replace a just-completed command.
-    if (!pending && generation === commandGeneration) {
+    if (!pending && !review.saving && !review.busy && generation === commandGeneration) {
       accept(next);
       if (!checkedOnLoad) {
         checkedOnLoad = true;
-        if (!next.operation && !next.session_id) await command("/api/check");
+        if (!next.operation && !next.session_id && !next.intent) await command("/api/check");
       }
     }
   } catch {

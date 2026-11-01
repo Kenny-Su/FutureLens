@@ -12,16 +12,21 @@ from urllib.error import HTTPError
 from PIL import Image
 
 import model
+from test_intent import snapshot
 
 
 def tool(name, arguments=None, call_id="call-1"):
+    if name == "shoot" and arguments is None:
+        arguments = {"snapshot": snapshot()}
+    if name == "set_preview_interval":
+        arguments = {"snapshot": snapshot(), **(arguments or {})}
     return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": call_id,
             "name": name, "input": arguments or {}}]}
 
 
 def answer(action):
     if action == "wait":
-        return {"model": model.MODEL, "stop_reason": "end_turn", "content": [{"type": "text", "text": "No photo."}]}
+        return {"model": model.MODEL, "stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps({"action": "wait", "snapshot": snapshot(condition="unmet")})}]}
     return tool(action)
 
 
@@ -51,7 +56,7 @@ class ModelTests(unittest.TestCase):
         with Image.open(io.BytesIO(encoded)) as sent:
             self.assertEqual(sent.size, (960, 540))
         self.assertEqual(image.size, (1920, 1080))
-        self.assertNotIn("format", payload["output_config"])
+        self.assertEqual(payload["output_config"]["format"]["schema"], model.WAIT_SCHEMA)
         self.assertEqual(payload["thinking"], {"type": "adaptive", "display": "omitted"})
         self.assertEqual(payload["output_config"]["effort"], "medium")
         self.assertEqual(payload["max_tokens"], 8192)
@@ -165,6 +170,7 @@ class ModelTests(unittest.TestCase):
     def test_compaction_request_and_signed_result_protocol(self):
         messages = [{"role": "user", "content": [model.text_content("session")]}]
         ordinary = model.make_payload(messages)
+        ordinary["output_config"].pop("format")
         summary = model.make_compaction_payload(messages)
         self.assertEqual({k: v for k, v in summary.items() if k != "compaction"}, ordinary)
         self.assertEqual(summary["compaction"], {"type": "summarize"})
@@ -181,6 +187,27 @@ class ModelTests(unittest.TestCase):
                         {**response, "content": response["content"] + answer("shoot")["content"]}):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 model.parse_compaction(invalid)
+
+    def test_review_uses_exact_resized_pixels_and_preserves_correction_context(self):
+        from test_intent import plan
+        previous = plan()
+        proposed = plan()
+        proposed["targets"][0]["box"] = [96, 54, 480, 270]
+        response = {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps(proposed)}]}
+        with patch("model.count_tokens", return_value=1000) as count, patch("model.call_model", return_value=response) as call:
+            result = model.propose_intent("Left peak", Image.new("RGB", (1920, 1080)), self.config,
+                                         previous=previous, feedback="Keep the corrected label")
+        payload = call.call_args.args[0]
+        self.assertEqual(count.call_args.args[0], payload)
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+        context = json.loads(payload["messages"][0]["content"][0]["text"])
+        self.assertEqual((context["image_width"], context["image_height"]), (960, 540))
+        self.assertEqual(context["previous_approved_by_user_edits"], previous)
+        self.assertEqual(result["targets"][0]["box"], [.1, .1, .5, .5])
+        with Image.open(io.BytesIO(base64.b64decode(payload["messages"][0]["content"][1]["source"]["data"]))) as sent:
+            self.assertEqual(sent.size, (960, 540))
+        self.assertEqual(model.make_payload([])["output_config"]["format"]["schema"], model.WAIT_SCHEMA)
 
     @patch.dict("os.environ", {}, clear=True)
     def test_both_endpoints_require_a_key(self):

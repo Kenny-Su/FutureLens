@@ -1,7 +1,8 @@
 """Serve the WaitLess camera interface locally, without a frontend build step."""
 
 import argparse
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
@@ -10,10 +11,12 @@ import secrets
 import threading
 from urllib.parse import unquote, urlsplit
 import webbrowser
+from PIL import Image
 
 from camera import SonyCamera, DEFAULT_HELPER
-from waitless import SessionSettings, run_session
-from model import load_config, validate_config
+from waitless import SessionSettings, run_session, write_json
+from model import load_config, validate_config, model_image, propose_intent
+from intent import ApprovedIntent, validate_intent, text
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "web"
@@ -38,6 +41,9 @@ class SessionManager:
         self.error = None
         self.camera_check = None
         self.check_output = None
+        self.intent = None
+        self.intent_output = None
+        self.intent_generation = 0
         self.token = secrets.token_urlsafe(32)
 
     def _folder(self, prefix):
@@ -54,25 +60,125 @@ class SessionManager:
         with self.lock:
             if self.operation is not None:
                 raise ValueError("A camera operation is already running.")
+            draft = self._draft(data)
+            if set(data) != {"intent_id", "revision"} or draft["status"] != "ready":
+                raise ValueError("Review the current interpretation before starting.")
             output = self._folder("session")
-            settings = session_settings(data)
+            settings = session_settings({"request": draft["request"]})
             validate_config(load_config())
             if not self.helper.is_file():
                 raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
+            approved = ApprovedIntent.create(draft, self.intent_output / "reference.jpg",
+                                             datetime.now(timezone.utc).isoformat())
+            self._save_intent({**draft, "status": "approved", "approved_at": approved.data["approved_at"]})
             self.output, self.error = output, None
             self.camera_check = None
             self.stop_event = threading.Event()
-            self._launch("monitor", lambda: self._monitor(settings))
+            self._launch("monitor", lambda: self._monitor(settings, approved))
 
-    def _monitor(self, settings):
+    def _monitor(self, settings, approved):
         try:
-            run_session(settings, self.output, camera_helper=self.helper, stop_event=self.stop_event)
+            run_session(settings, self.output, approved_intent=approved,
+                        camera_helper=self.helper, stop_event=self.stop_event)
         except Exception as exc:
             with self.lock:
                 self.error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
         finally:
             with self.lock:
                 self.operation = None
+
+    def _draft(self, data):
+        if (not isinstance(data, dict) or not self.intent or data.get("intent_id") != self.intent["id"]
+                or type(data.get("revision")) is not int or data["revision"] != self.intent["revision"]):
+            raise ValueError("The intent changed. Reload the current review and try again.")
+        return self.intent
+
+    def _save_intent(self, draft):
+        write_json(self.intent_output / "intent.json", draft)
+        self.intent = draft
+
+    def prepare_intent(self, data):
+        settings = session_settings(data)
+        config = load_config()
+        validate_config(config)
+        if not self.helper.is_file():
+            raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
+        with self.lock:
+            if self.operation is not None:
+                raise ValueError("Wait for the current camera operation to finish.")
+            self.intent_generation += 1
+            generation = self.intent_generation
+            self.intent_output = self._folder("intent")
+            self.intent_output.mkdir(parents=True)
+            draft = {"id": self.intent_output.name, "revision": 1, "request": settings.request,
+                     "status": "preparing", "condition": "", "targets": [], "error": None,
+                     "preview": None}
+            self._save_intent(draft)
+            self._launch("intent", lambda: self._interpret(generation, deepcopy(draft), config, fresh=True))
+
+    def update_intent(self, data):
+        with self.lock:
+            draft = self._draft(data)
+            if self.operation or draft["status"] != "ready" or set(data) != {"intent_id", "revision", "plan"}:
+                raise ValueError("Wait for a ready interpretation before editing.")
+            plan = validate_intent(data["plan"])
+            self._save_intent({**draft, **plan, "revision": draft["revision"] + 1, "error": None})
+
+    def refine_intent(self, data):
+        with self.lock:
+            draft = self._draft(data)
+            if (self.operation or draft["status"] not in ("ready", "failed") or not draft.get("preview")
+                    or set(data) != {"intent_id", "revision", "feedback"}):
+                raise ValueError("Wait for the reference image before updating the interpretation.")
+            feedback = text(data["feedback"], "Feedback", 8000)
+            config = load_config()
+            validate_config(config)
+            self.intent_generation += 1
+            generation = self.intent_generation
+            draft = {**draft, "revision": draft["revision"] + 1, "status": "refining", "error": None}
+            self._save_intent(draft)
+            self._launch("intent", lambda: self._interpret(generation, deepcopy(draft), config, feedback=feedback))
+
+    def cancel_intent(self, data):
+        with self.lock:
+            draft = self._draft(data)
+            if set(data) != {"intent_id", "revision"} or draft["status"] == "approved":
+                raise ValueError("Only a pending review can be cancelled.")
+            self.intent_generation += 1
+            self._save_intent({**draft, "status": "cancelled", "revision": draft["revision"] + 1})
+            # An in-flight SDK/API call finishes before another operation can own the camera.
+
+    def _interpret(self, generation, draft, config, *, fresh=False, feedback=""):
+        folder = self.intent_output
+        try:
+            if fresh:
+                with SonyCamera(folder / "moments", helper=self.helper, enable_capture=False) as camera:
+                    image = model_image(camera.latest_frame().image)
+                    draft.update(camera_model=camera.model, camera_capabilities=camera.capabilities)
+                image.save(folder / "reference.jpg", quality=95, subsampling=0)
+                draft.update(width=image.width, height=image.height,
+                             reference_at=datetime.now(timezone.utc).isoformat(),
+                             preview=f"/media/{folder.name}/reference.jpg")
+                with self.lock:
+                    if generation != self.intent_generation:
+                        return
+                    self._save_intent(deepcopy(draft))
+            with Image.open(folder / "reference.jpg") as image:
+                previous = {k: draft[k] for k in ("condition", "targets")} if draft["targets"] else None
+                plan = propose_intent(draft["request"], image, config, previous=previous, feedback=feedback)
+            # Validate again at the boundary even when the model adapter is replaced in tests.
+            plan = validate_intent(plan)
+            draft.update(plan, status="ready", revision=draft["revision"] + 1, error=None)
+        except Exception as exc:
+            draft.update(status="ready" if draft["targets"] else "failed",
+                         error=str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__)
+        finally:
+            with self.lock:
+                try:
+                    if generation == self.intent_generation:
+                        self._save_intent(draft)
+                finally:
+                    self.operation = None
 
     def check_camera(self):
         with self.lock:
@@ -104,6 +210,8 @@ class SessionManager:
 
     def close(self):
         self.stop()
+        with self.lock:
+            self.intent_generation += 1
         if self.worker:
             self.worker.join()
 
@@ -121,16 +229,21 @@ class SessionManager:
                     "stopping": self.operation == "monitor" and self.stop_event.is_set(),
                     "session_id": self.output.name if self.output else None,
                     "output": str(self.output) if self.output else None,
-                    "report": self._report(), "error": self.error, "camera_check": self.camera_check}
+                    "report": self._report(), "error": self.error, "camera_check": self.camera_check,
+                    "intent": deepcopy(self.intent)}
 
     def media_file(self, session, name):
         with self.lock:
-            if self.check_output and session == self.check_output.name and name == "preview.jpg":
+            if self.intent_output and session == self.intent_output.name and name == "reference.jpg":
+                folder, allowed = self.intent_output, {"reference.jpg"}
+            elif self.check_output and session == self.check_output.name and name == "preview.jpg":
                 folder, allowed = self.check_output, {"preview.jpg"}
             elif self.output and session == self.output.name:
                 folder = self.output
                 report = self._report() or {}
                 allowed = set()
+                if report.get("intent"):
+                    allowed.add("intent-reference.jpg")
                 for entry in report.get("observations", []):
                     allowed.add(entry["preview_file"])
                     if entry.get("capture_status") == "downloaded":
@@ -199,7 +312,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/state":
                 self._json(self.server.manager.state())
-            elif path in ("/", "/app.js", "/activity.mjs", "/style.css"):
+            elif path in ("/", "/app.js", "/activity.mjs", "/intent.mjs", "/review.js", "/style.css"):
                 self._file(STATIC / ("index.html" if path == "/" else path[1:]))
             elif path.startswith("/media/"):
                 _, _, session, name = path.split("/", 3)
@@ -218,7 +331,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 32_768 or self.headers.get_content_type() != "application/json":
+            if not 0 < length <= 131_072 or self.headers.get_content_type() != "application/json":
                 raise ValueError("Expected a small JSON request.")
             data = json.loads(self.rfile.read(length))
             if self.path == "/api/start":
@@ -227,6 +340,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.manager.stop()
             elif self.path == "/api/check":
                 self.server.manager.check_camera()
+            elif self.path == "/api/intent/prepare":
+                self.server.manager.prepare_intent(data)
+            elif self.path == "/api/intent/update":
+                self.server.manager.update_intent(data)
+            elif self.path == "/api/intent/refine":
+                self.server.manager.refine_intent(data)
+            elif self.path == "/api/intent/cancel":
+                self.server.manager.cancel_intent(data)
             else:
                 self._json({"error": "Not found."}, 404)
                 return
