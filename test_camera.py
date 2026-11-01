@@ -158,34 +158,131 @@ class CameraWorkflowTests(unittest.TestCase):
         self.assertEqual(self.camera.captures, [0])
         self.assertEqual([x["model_calls"] for x in (first, second)], [1, 1])
 
-    def test_wrong_frame_missing_and_unknown_annotations_cannot_capture(self):
-        malformed = [snapshot(99), {**snapshot(), "targets": []},
-                     {**snapshot(), "targets": [{"id": "other", "status": "visible", "box": [0, 0, 5, 5]}]}]
+    def test_met_wait_is_corrected_on_the_same_frame_before_one_photo_is_taken(self):
+        # Replay the old met+wait response without a reason, then require an explicit shoot.
+        contradictory = answer("wait", condition="met")
+        value = json.loads(contradictory["content"][0]["text"])
+        value.pop("wait_reason")
+        contradictory["content"][0]["text"] = json.dumps(value)
+        self.replies = iter([contradictory, tool("shoot"),
+                             answer("wait", condition="met", wait_reason="already_captured")])
+        self.run_session(self.settings(stop_after_calls=3, request="Take one photo when the mug moves left"), self.output)
+        first, second = self.report()["observations"]
+        self.assertEqual([first["outcome"], second["outcome"]], ["downloaded", "no_photo"])
+        self.assertEqual([first["model_calls"], second["model_calls"]], [2, 1])
+        self.assertEqual(first["assessment"]["frame_id"], 0)
+        self.assertEqual(second["wait_reason"], "already_captured")
+        self.assertEqual(self.camera.captures, [0])
+        feedback = json.loads(self.inferences()[1]["messages"][-1]["content"][0]["text"])
+        self.assertEqual(feedback["current_preview_id"], 0)
+        self.assertEqual(feedback["session"]["photos_taken"], 0)
+        self.assertFalse(feedback["executed"])
+
+    def test_met_wait_can_correct_the_condition_without_taking_a_photo(self):
+        self.replies = iter([answer("wait", condition="met"),
+                             answer("wait", condition="uncertain", wait_reason="condition_uncertain")])
+        self.run_session(self.settings(stop_after_calls=2), self.output)
+        entry = self.report()["observations"][0]
+        self.assertEqual(entry["outcome"], "no_photo")
+        self.assertEqual(entry["assessment"]["condition"], "uncertain")
+        self.assertEqual(entry["wait_reason"], "condition_uncertain")
+        self.assertEqual(self.camera.captures, [])
+
+    def test_unresolved_met_wait_is_bounded_and_does_not_fire_the_shutter(self):
+        self.replies = iter([answer("wait", condition="met"),
+                             answer("wait", condition="met", wait_reason="already_captured")])
+        self.run_session(self.settings(stop_after_calls=2), self.output)
+        entry = self.report()["observations"][0]
+        self.assertEqual(entry["outcome"], "invalid_decision")
+        self.assertEqual(entry["model_calls"], 2)
+        self.assertEqual(entry["capture_status"], "not_requested")
+        self.assertEqual(entry["assessment_status"], "unavailable")
+        self.assertIsNone(entry["assessment"])
+        self.assertNotIn("wait_reason", entry)
+        self.assertEqual(self.camera.captures, [])
+
+    def test_correction_never_overrides_preview_freshness(self):
+        self.inference_delay = 16
+        self.replies = iter([answer("wait", condition="met"), tool("shoot")])
+        self.run_session(self.settings(stop_after_calls=2), self.output)
+        entry = self.report()["observations"][0]
+        self.assertEqual(entry["capture_status"], "skipped_stale_frame")
+        self.assertEqual(self.camera.captures, [])
+
+    def test_met_wait_at_call_limit_cannot_start_an_extra_inference(self):
+        self.replies = iter([*[tool("list_history", call_id=f"history-{i}") for i in range(5)],
+                             answer("wait", condition="met")])
+        self.run_session(self.settings(stop_after_calls=6), self.output)
+        entry = self.report()["observations"][0]
+        self.assertEqual((entry["model_calls"], entry["outcome"]), (6, "invalid_decision"))
+        self.assertEqual(self.camera.captures, [])
+
+    def test_stop_during_decision_correction_prevents_capture(self):
+        stop = threading.Event()
+        replies = iter([answer("wait", condition="met"), tool("shoot")])
+        def inference(payload, *_, **__):
+            reply = next(replies)
+            if reply["stop_reason"] == "tool_use":
+                stop.set()
+            return bind_snapshot(reply, payload)
+        with patch("waitless.call_model", side_effect=inference):
+            self.run_session(self.settings(), self.output, stop_event=stop)
+        self.assertEqual(self.report()["observations"][0]["capture_status"], "skipped_user_stop")
+        self.assertEqual(self.camera.captures, [])
+
+    def test_interval_change_cannot_silently_defer_a_met_condition(self):
+        self.replies = iter([tool("set_preview_interval", {"seconds": 300, "snapshot": snapshot()}),
+                             tool("shoot", call_id="corrected")])
+        self.run_session(self.settings(stop_after_calls=2), self.output)
+        self.assertEqual(self.report()["current_interval_s"], 60)
+        self.assertEqual(self.camera.captures, [0])
+        rejected = self.inferences()[1]["messages"][-1]["content"][0]
+        self.assertTrue(rejected["is_error"])
+        self.assertEqual(rejected["tool_use_id"], "call-1")
+
+    def test_active_cooldown_can_defer_met_condition_without_extra_inference(self):
+        self.replies = iter([tool("shoot"), answer("wait", condition="met", wait_reason="cooldown")])
+        self.run_session(self.settings(stop_after_calls=2, cooldown=90), self.output)
+        first, second = self.report()["observations"]
+        self.assertEqual([first["model_calls"], second["model_calls"]], [1, 1])
+        self.assertEqual(second["wait_reason"], "cooldown")
+        self.assertEqual(self.camera.captures, [0])
+
+    def test_wait_correction_does_not_prevent_repeating_requests(self):
+        self.replies = iter([tool("shoot", call_id="first"), answer("wait", condition="met"),
+                             tool("shoot", call_id="next")])
+        self.run_session(self.settings(stop_after_calls=3, request="Take a photo each time the mug moves left"), self.output)
+        self.assertEqual(self.camera.captures, [0, 1])
+        self.assertEqual([e["model_calls"] for e in self.report()["observations"]], [1, 2])
+
+    def test_wrong_frame_revision_and_missing_condition_cannot_capture(self):
+        malformed = [snapshot(99), {**snapshot(0), "intent_revision": 99},
+                     {"frame_id": 0, "intent_revision": 1}]
         for index, value in enumerate(malformed):
             with self.subTest(snapshot=value):
                 self.replies = iter([tool("shoot", {"snapshot": value})])
                 output = self.output / str(index)
                 self.run_session(self.settings(stop_after_calls=1), output)
                 entry = json.loads((output / "results.json").read_text())["observations"][0]
-                self.assertEqual(entry["outcome"], "invalid_annotations")
-                self.assertIsNone(entry["annotations"])
-                self.assertEqual(entry["annotations_status"], "unavailable")
+                self.assertEqual(entry["outcome"], "invalid_assessment")
+                self.assertIsNone(entry["assessment"])
+                self.assertEqual(entry["assessment_status"], "unavailable")
         self.assertEqual(self.camera.captures, [])
 
-    def test_no_action_without_annotations_does_not_reuse_previous_boxes(self):
+    def test_no_action_without_assessment_does_not_reuse_previous_result(self):
         self.replies = iter([answer("wait"), {"stop_reason": "end_turn", "content": [{"type": "text", "text": "No action."}]}])
         self.run_session(self.settings(stop_after_calls=2), self.output)
         first, second = self.report()["observations"]
-        self.assertEqual(first["annotations_status"], "available")
-        self.assertEqual(second["annotations_status"], "unavailable")
-        self.assertIsNone(second["annotations"])
+        self.assertEqual(first["assessment_status"], "available")
+        self.assertEqual(second["assessment_status"], "unavailable")
+        self.assertIsNone(second["assessment"])
         self.assertEqual(self.camera.captures, [])
 
     def test_shoot_without_a_snapshot_skips_capture_and_keeps_monitoring(self):
         self.replies = iter([tool("shoot", {}), answer("wait")])
         self.run_session(self.settings(stop_after_calls=2), self.output)
         self.assertEqual(self.camera.captures, [])
-        self.assertEqual([entry["outcome"] for entry in self.report()["observations"]], ["invalid_annotations", "no_photo"])
+        self.assertEqual([entry["outcome"] for entry in self.report()["observations"]], ["invalid_assessment", "no_photo"])
 
     def test_approved_corrections_and_reference_survive_compaction(self):
         from intent import ApprovedIntent
@@ -206,20 +303,37 @@ class CameraWorkflowTests(unittest.TestCase):
             self.assertEqual([b["type"] for b in content], ["text", "text", "image", "text", "image"])
         self.assertEqual(self.report()["api_requests"] - self.report()["compaction_requests"], 7)
 
-    def test_confirmed_absence_can_capture_for_a_negative_condition(self):
+    def test_negative_condition_can_capture_without_target_localization(self):
         from intent import ApprovedIntent
         from test_intent import draft
         settings = self.settings(stop_after_calls=1, request="Photograph the empty chair")
         root = self.output.parent / "negative"
         data = draft(root, settings.request)
         data["condition"] = "The chair is empty"
-        data["targets"][0].update(label="Person in chair", mode="object", box=None)
+        data["targets"] = []
         self.approved = ApprovedIntent.create(data, root / "reference.jpg", "now")
-        value = snapshot(); value["targets"][0].update(status="absent", box=None)
-        self.replies = iter([tool("shoot", {"snapshot": value})])
+        self.replies = iter([tool("shoot")])
         self.run_session(settings, self.output)
         self.assertEqual(self.camera.captures, [0])
-        self.assertIsNone(self.report()["observations"][0]["annotations"]["targets"][0]["box"])
+        self.assertEqual(self.report()["observations"][0]["assessment"], snapshot(0))
+
+    def test_review_targets_do_not_require_tracking_in_wait_or_shoot(self):
+        from intent import ApprovedIntent
+        from test_intent import draft
+        settings = self.settings(stop_after_calls=2)
+        root = self.output.parent / "many-targets"
+        data = draft(root, settings.request)
+        data["targets"] = [{**data["targets"][0], "id": f"target-{i}"}
+                           for i in range(24)]
+        self.approved = ApprovedIntent.create(data, root / "reference.jpg", "now")
+        self.replies = iter([answer("wait"), tool("shoot")])
+        self.run_session(settings, self.output)
+        for entry in self.report()["observations"]:
+            self.assertEqual(entry["model_calls"], 1)
+            self.assertEqual(set(entry["assessment"]), {"frame_id", "intent_revision", "condition"})
+            self.assertNotIn("annotations", entry)
+            self.assertNotIn("annotations_status", entry)
+        self.assertEqual(self.camera.captures, [0])
 
     def test_session_settings_defaults_and_validation(self):
         settings = fl.SessionSettings(request="landscape")
@@ -307,8 +421,8 @@ class CameraWorkflowTests(unittest.TestCase):
         self.run_session(self.settings(stop_after_calls=8), self.output)
         self.assertEqual(self.camera.frame_times, [100, 400, 700])
         self.assertEqual(self.report()["observations"][1]["outcome"], "run_limit")
-        self.assertEqual(self.report()["observations"][1]["annotations_status"], "unavailable")
-        self.assertIsNone(self.report()["observations"][1]["annotations"])
+        self.assertEqual(self.report()["observations"][1]["assessment_status"], "unavailable")
+        self.assertIsNone(self.report()["observations"][1]["assessment"])
         self.assertEqual([entry["next_preview_interval_s"] for entry in self.report()["observations"]], [300, 300, 300])
         self.assertEqual(self.report()["last_interval_change"]["from_frame_id"], 0)
 

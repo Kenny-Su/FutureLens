@@ -34,8 +34,12 @@ time. WaitLess separates observation from capture:
 
 1. **Describe your moment.** Use a plain-language instruction about the subject,
    visibility, or light you want.
-2. **Review what matters.** Inspect the agent’s capture condition and highlighted
-   targets. Correct boxes or descriptions, then approve monitoring.
+2. **Align on the moment.** Start with the agent's interpretation, then discuss
+   corrections or “what if” questions alongside the marked reference. It asks
+   focused questions when something is unclear and updates the capture condition
+   as you talk. The preview is the agent's whiteboard: it can highlight visible
+   details to illustrate its words, and revise those highlights when you correct
+   it in conversation. Approve when the shutter condition matches what you want.
 3. **Let WaitLess watch.** Preview timing is automatic. Claude chooses when to
    inspect the next live-view preview: less often while the mountain stays hidden,
    more often as clouds clear. It can compare earlier previews to assess change.

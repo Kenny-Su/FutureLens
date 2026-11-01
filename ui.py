@@ -15,8 +15,8 @@ from PIL import Image
 
 from camera import SonyCamera, DEFAULT_HELPER
 from waitless import SessionSettings, run_session, write_json
-from model import load_config, validate_config, model_image, propose_intent
-from intent import ApprovedIntent, validate_intent, text
+from model import load_config, validate_config, model_image, review_intent
+from intent import ApprovedIntent, validate_review
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "web"
@@ -61,7 +61,8 @@ class SessionManager:
             if self.operation is not None:
                 raise ValueError("A camera operation is already running.")
             draft = self._draft(data)
-            if set(data) != {"intent_id", "revision"} or draft["status"] != "ready":
+            if (set(data) != {"intent_id", "revision"} or draft["status"] != "ready"
+                    or draft.get("condition_stale") or draft.get("question") or draft.get("pending_message_id")):
                 raise ValueError("Review the current interpretation before starting.")
             output = self._folder("session")
             settings = session_settings({"request": draft["request"]})
@@ -97,8 +98,11 @@ class SessionManager:
         write_json(self.intent_output / "intent.json", draft)
         self.intent = draft
 
+    @staticmethod
+    def _message(role, message, **details):
+        return {"id": secrets.token_hex(8), "role": role, "text": message, **details}
+
     def prepare_intent(self, data):
-        settings = session_settings(data)
         config = load_config()
         validate_config(config)
         if not self.helper.is_file():
@@ -106,23 +110,30 @@ class SessionManager:
         with self.lock:
             if self.operation is not None:
                 raise ValueError("Wait for the current camera operation to finish.")
+            previous = None
+            if isinstance(data, dict) and set(data) == {"intent_id", "revision"}:
+                previous = self._draft(data)
+                if previous["status"] not in ("ready", "failed"):
+                    raise ValueError("Only a pending review can refresh its reference.")
+                settings = session_settings({"request": previous["request"]})
+            else:
+                settings = session_settings(data)
             self.intent_generation += 1
             generation = self.intent_generation
             self.intent_output = self._folder("intent")
             self.intent_output.mkdir(parents=True)
+            conversation = deepcopy(previous["conversation"]) if previous else []
+            message = self._message("user", "I refreshed the preview. Recheck our interpretation against this image."
+                                    if previous else settings.request,
+                                    kind="refresh" if previous else "message", reference_id=self.intent_output.name)
+            conversation.append(message)
             draft = {"id": self.intent_output.name, "revision": 1, "request": settings.request,
                      "status": "preparing", "condition": "", "targets": [], "error": None,
-                     "preview": None}
+                     "preview": None, "condition_stale": True, "question": "",
+                     "conversation": conversation, "pending_message_id": message["id"],
+                     "previous_interpretation": {k: previous[k] for k in ("condition", "targets", "question")} if previous else None}
             self._save_intent(draft)
             self._launch("intent", lambda: self._interpret(generation, deepcopy(draft), config, fresh=True))
-
-    def update_intent(self, data):
-        with self.lock:
-            draft = self._draft(data)
-            if self.operation or draft["status"] != "ready" or set(data) != {"intent_id", "revision", "plan"}:
-                raise ValueError("Wait for a ready interpretation before editing.")
-            plan = validate_intent(data["plan"])
-            self._save_intent({**draft, **plan, "revision": draft["revision"] + 1, "error": None})
 
     def refine_intent(self, data):
         with self.lock:
@@ -130,14 +141,24 @@ class SessionManager:
             if (self.operation or draft["status"] not in ("ready", "failed") or not draft.get("preview")
                     or set(data) != {"intent_id", "revision", "feedback"}):
                 raise ValueError("Wait for the reference image before updating the interpretation.")
-            feedback = text(data["feedback"], "Feedback", 8000)
+            if not isinstance(data["feedback"], str) or len(data["feedback"]) > 8000:
+                raise ValueError("Feedback must be text up to 8,000 characters.")
+            feedback = data["feedback"].strip()
+            retry = not feedback and draft.get("pending_message_id") and draft.get("error")
+            if not feedback and not retry:
+                raise ValueError("Send a message to continue the conversation.")
             config = load_config()
             validate_config(config)
             self.intent_generation += 1
             generation = self.intent_generation
-            draft = {**draft, "revision": draft["revision"] + 1, "status": "refining", "error": None}
+            draft = {**draft, "revision": draft["revision"] + 1, "status": "refining", "error": None,
+                     "condition_stale": True}
+            if not retry:
+                message = self._message("user", feedback, reference_id=draft["id"])
+                draft["conversation"] = [*draft["conversation"], message]
+                draft["pending_message_id"] = message["id"]
             self._save_intent(draft)
-            self._launch("intent", lambda: self._interpret(generation, deepcopy(draft), config, feedback=feedback))
+            self._launch("intent", lambda: self._interpret(generation, deepcopy(draft), config))
 
     def cancel_intent(self, data):
         with self.lock:
@@ -148,7 +169,7 @@ class SessionManager:
             self._save_intent({**draft, "status": "cancelled", "revision": draft["revision"] + 1})
             # An in-flight SDK/API call finishes before another operation can own the camera.
 
-    def _interpret(self, generation, draft, config, *, fresh=False, feedback=""):
+    def _interpret(self, generation, draft, config, *, fresh=False):
         folder = self.intent_output
         try:
             if fresh:
@@ -164,13 +185,20 @@ class SessionManager:
                         return
                     self._save_intent(deepcopy(draft))
             with Image.open(folder / "reference.jpg") as image:
-                previous = {k: draft[k] for k in ("condition", "targets")} if draft["targets"] else None
-                plan = propose_intent(draft["request"], image, config, previous=previous, feedback=feedback)
+                previous = ({k: draft[k] for k in ("condition", "targets", "question")}
+                            if draft["condition"] else draft.get("previous_interpretation"))
+                reply = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
+                                      previous=deepcopy(previous), reference_changed=not bool(draft["condition"]))
             # Validate again at the boundary even when the model adapter is replaced in tests.
-            plan = validate_intent(plan)
-            draft.update(plan, status="ready", revision=draft["revision"] + 1, error=None)
+            reply = validate_review(reply)
+            plan = {k: reply[k] for k in ("condition", "targets")}
+            draft.update(plan, question=reply["question"], status="ready", revision=draft["revision"] + 1,
+                         error=None, condition_stale=False, pending_message_id=None)
+            draft["conversation"].append(self._message("assistant", reply["reply"], condition=reply["condition"],
+                                                       question=reply["question"], targets=deepcopy(reply["targets"]),
+                                                       reference_id=draft["id"], revision=draft["revision"]))
         except Exception as exc:
-            draft.update(status="ready" if draft["targets"] else "failed",
+            draft.update(status="ready" if draft["condition"] else "failed",
                          error=str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__)
         finally:
             with self.lock:
@@ -342,8 +370,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.manager.check_camera()
             elif self.path == "/api/intent/prepare":
                 self.server.manager.prepare_intent(data)
-            elif self.path == "/api/intent/update":
-                self.server.manager.update_intent(data)
             elif self.path == "/api/intent/refine":
                 self.server.manager.refine_intent(data)
             elif self.path == "/api/intent/cancel":

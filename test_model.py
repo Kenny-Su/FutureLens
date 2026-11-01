@@ -19,14 +19,15 @@ def tool(name, arguments=None, call_id="call-1"):
     if name == "shoot" and arguments is None:
         arguments = {"snapshot": snapshot()}
     if name == "set_preview_interval":
-        arguments = {"snapshot": snapshot(), **(arguments or {})}
+        arguments = {"snapshot": snapshot(condition="unmet"), "wait_reason": "condition_unmet", **(arguments or {})}
     return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": call_id,
             "name": name, "input": arguments or {}}]}
 
 
-def answer(action):
+def answer(action, *, condition="unmet", wait_reason="condition_unmet"):
     if action == "wait":
-        return {"model": model.MODEL, "stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps({"action": "wait", "snapshot": snapshot(condition="unmet")})}]}
+        return {"model": model.MODEL, "stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps({
+            "action": "wait", "snapshot": snapshot(condition=condition), "wait_reason": wait_reason})}]}
     return tool(action)
 
 
@@ -57,6 +58,7 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(sent.size, (960, 540))
         self.assertEqual(image.size, (1920, 1080))
         self.assertEqual(payload["output_config"]["format"]["schema"], model.WAIT_SCHEMA)
+        self.assertEqual(set(model.SNAPSHOT_SCHEMA["properties"]), {"frame_id", "intent_revision", "condition"})
         self.assertEqual(payload["thinking"], {"type": "adaptive", "display": "omitted"})
         self.assertEqual(payload["output_config"]["effort"], "medium")
         self.assertEqual(payload["max_tokens"], 8192)
@@ -189,25 +191,63 @@ class ModelTests(unittest.TestCase):
                 model.parse_compaction(invalid)
 
     def test_review_uses_exact_resized_pixels_and_preserves_correction_context(self):
-        from test_intent import plan
+        from test_intent import plan, review_reply
         previous = plan()
-        proposed = plan()
+        proposed = {**plan(), **review_reply()}
         proposed["targets"][0]["box"] = [96, 54, 480, 270]
         response = {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps(proposed)}]}
         with patch("model.count_tokens", return_value=1000) as count, patch("model.call_model", return_value=response) as call:
-            result = model.propose_intent("Left peak", Image.new("RGB", (1920, 1080)), self.config,
-                                         previous=previous, feedback="Keep the corrected label")
+            result = model.review_intent("Left peak", Image.new("RGB", (1920, 1080)), self.config,
+                                         previous=previous, conversation=[{"role": "user", "text": "Keep the corrected label"}])
         payload = call.call_args.args[0]
         self.assertEqual(count.call_args.args[0], payload)
         self.assertNotIn("tools", payload)
         self.assertNotIn("tool_choice", payload)
-        context = json.loads(payload["messages"][0]["content"][0]["text"])
+        context = json.loads(payload["messages"][0]["content"][-2]["text"])
         self.assertEqual((context["image_width"], context["image_height"]), (960, 540))
-        self.assertEqual(context["previous_approved_by_user_edits"], previous)
+        self.assertEqual(context["previous_interpretation"], previous)
         self.assertEqual(result["targets"][0]["box"], [.1, .1, .5, .5])
-        with Image.open(io.BytesIO(base64.b64decode(payload["messages"][0]["content"][1]["source"]["data"]))) as sent:
+        with Image.open(io.BytesIO(base64.b64decode(payload["messages"][0]["content"][-1]["source"]["data"]))) as sent:
             self.assertEqual(sent.size, (960, 540))
         self.assertEqual(model.make_payload([])["output_config"]["format"]["schema"], model.WAIT_SCHEMA)
+
+    def test_review_replays_discussion_and_can_replace_or_clear_its_highlights(self):
+        from test_intent import plan, review_reply
+        targets = plan()["targets"]
+        conversation = [{"role": "user", "text": "Photograph the summit"},
+                        {"role": "assistant", "text": "I've marked the summit.",
+                         "condition": "Capture when clear; frequency to be decided", "question": "Just one photo?",
+                         "targets": targets, "reference_id": "ref-1"},
+                        {"role": "user", "text": "Yes, and only when fully clear."},
+                        {"role": "assistant", "text": "I'll wait until it is fully clear, then take one photo.",
+                         "condition": "Take one photo when fully clear", "question": ""},
+                        {"role": "user", "text": "What if a little cloud is still on the summit?"}]
+        result_data = review_reply("Take one photo when the summit is fully clear")
+        result_data["reply"] = "I would keep waiting while any cloud still covers the summit."
+        result_data["targets"] = [{"id": "summit", "label": "Summit", "box": [96, 54, 480, 270]}]
+        response = {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps(result_data)}]}
+        with patch("model.count_tokens", return_value=1000), patch("model.call_model", return_value=response) as call:
+            result = model.review_intent("One photo", Image.new("RGB", (1920, 1080)), self.config,
+                                         conversation=conversation, previous=plan())
+            self.assertEqual(result["condition"], result_data["condition"])
+            self.assertEqual(result["targets"], [{"id": "summit", "label": "Summit", "box": [.1, .1, .5, .5]}])
+            payload = call.call_args.args[0]
+            self.assertNotIn("tools", payload)
+            self.assertEqual([m["role"] for m in payload["messages"]], [m["role"] for m in conversation])
+            self.assertEqual(json.loads(payload["messages"][1]["content"][0]["text"])["question"], "Just one photo?")
+            self.assertEqual(json.loads(payload["messages"][1]["content"][0]["text"])["highlights_normalized"], targets)
+            self.assertIn("Yes, and only when fully clear.", payload["messages"][2]["content"][0]["text"])
+            self.assertIn("What if", payload["messages"][-1]["content"][0]["text"])
+            context = json.loads(payload["messages"][-1]["content"][-2]["text"])
+            self.assertEqual(context["previous_interpretation"], plan())
+            self.assertEqual(set(payload["output_config"]["format"]["schema"]["properties"]), {"condition", "reply", "question", "targets"})
+            response["content"][0]["text"] = json.dumps({**result_data, "targets": []})
+            self.assertEqual(model.review_intent("One photo", Image.new("RGB", (160, 90)), self.config,
+                                                conversation=conversation)["targets"], [])
+            result_data["targets"][0]["box"] = None
+            response["content"][0]["text"] = json.dumps(result_data)
+            with self.assertRaises(ValueError):
+                model.review_intent("One photo", Image.new("RGB", (160, 90)), self.config, conversation=conversation)
 
     @patch.dict("os.environ", {}, clear=True)
     def test_both_endpoints_require_a_key(self):

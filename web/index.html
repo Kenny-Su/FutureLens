@@ -32,29 +32,25 @@
     </section>
 
     <section id="intent-review" aria-labelledby="review-title" hidden>
-      <div class="monitor-header"><div><span class="eyebrow">Before monitoring</span><h1 id="review-title">Review what matters</h1></div><button id="intent-cancel" class="button secondary" type="button">Back to instruction</button></div>
-      <p id="review-request" class="review-request"></p>
+      <div class="monitor-header"><div><span class="eyebrow">Before monitoring</span><h1 id="review-title">Align on the moment</h1></div><button id="intent-cancel" class="button secondary" type="button">Back to instruction</button></div>
       <p id="intent-error" class="intent-error" role="alert"></p>
       <div class="review-grid">
         <div class="review-visual">
-          <div id="intent-image-wrap" class="image-surface" hidden><img id="intent-image" alt="Reference preview for correcting photography intent"><svg id="intent-overlay" class="intent-overlay editable" aria-label="Editable target regions" tabindex="0"></svg></div>
+          <div id="intent-image-wrap" class="image-surface" hidden><img id="intent-image" alt="Reference preview for the agent’s explanation"><svg id="intent-overlay" class="intent-overlay" role="img" aria-label="AI highlights"></svg></div>
           <div class="review-image-toolbar"><span id="intent-reference-time" class="muted small"></span><button id="intent-refresh" class="text-button" type="button">Refresh preview</button></div>
-          <p id="intent-editor-help" class="muted small"></p>
-          <p class="muted small">These highlights show the agent’s interpretation. Fixed areas assume the camera stays framed here.</p>
         </div>
-        <div class="review-details">
-          <fieldset id="review-fields">
-            <label class="intent-condition-label" for="intent-condition">What I’m watching for</label>
-            <textarea id="intent-condition" rows="4" maxlength="8000"></textarea>
-            <div class="review-image-toolbar"><h2>Relevant targets</h2><div><button id="add-target" class="text-button" type="button">Draw target</button> <button id="whole-frame" class="text-button" type="button">Whole frame</button></div></div>
-            <div id="intent-targets"></div>
-          </fieldset>
-          <label for="intent-feedback">Clarify a misunderstanding</label>
-          <textarea id="intent-feedback" rows="2" maxlength="8000" placeholder="For example: the smaller peak on the left, not the ridge."></textarea>
-          <button id="intent-refine" class="button secondary" type="button">Update interpretation</button>
-        </div>
+        <section class="review-conversation" aria-labelledby="conversation-title">
+          <div class="conversation-heading"><h2 id="conversation-title">Conversation</h2><span class="muted small">No capture during review</span></div>
+          <div id="review-messages" class="review-messages" role="log" aria-label="Intent review conversation" aria-live="polite" aria-relevant="additions" tabindex="0"></div>
+          <p id="review-thinking" class="review-thinking muted small" role="status" hidden>Considering your reply…</p>
+          <form id="review-composer" class="review-composer">
+            <label class="sr-only" for="intent-feedback">Message WaitLess</label>
+            <textarea id="intent-feedback" rows="3" maxlength="8000" placeholder="Correct a detail, answer a question, or ask “what if…”"></textarea>
+            <div class="composer-actions"><button id="intent-refine" class="button secondary" type="submit">Send <span aria-hidden="true">↑</span></button></div>
+          </form>
+        </section>
       </div>
-      <div class="review-footer"><span id="intent-save-status" class="muted" aria-live="polite"></span><button id="intent-reload" class="text-button" type="button" hidden>Reload saved review</button><button id="intent-start" class="button primary" type="button" disabled>Approve and start</button></div>
+      <div class="review-footer"><button id="intent-start" class="button primary" type="button" disabled>Approve and start</button></div>
     </section>
 
     <section id="monitor" aria-labelledby="monitor-title" hidden>

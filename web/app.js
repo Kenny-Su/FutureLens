@@ -1,12 +1,12 @@
 import { sessionActivity } from "./activity.mjs";
-import { drawOverlay, svgNode, annotationTargets, annotationText } from "./intent.mjs";
+import { drawOverlay, svgNode, annotationTargets, observationText, waitReasonText } from "./intent.mjs";
 import { IntentReview } from "./review.js";
 
 const $ = (id) => document.getElementById(id);
 const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", scheduling: "Updating preview interval…", compacting: "Organizing session context…", waiting: "Waiting for the next observation" };
 const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
 const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
-const outcomes = { invalid_annotations: "Highlights unavailable · keep checking", skipped_intent_uncertain: "Target uncertain · keep checking", skipped_condition_unmet: "Capture condition not met", no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
+const outcomes = { invalid_assessment: "Capture assessment unavailable · keep checking", invalid_decision: "Capture decision inconsistent · keep checking", invalid_annotations: "Highlights unavailable · keep checking", skipped_intent_uncertain: "Target uncertain · keep checking", skipped_condition_unmet: "Capture condition not met", no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
 const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot", set_preview_interval: "Change preview interval" };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
@@ -170,9 +170,10 @@ function openImage(id) {
   loadPreview($("viewer-image"), media(entry.preview_file));
   $("viewer-image").alt = `Observation ${id + 1} at ${clock(entry.timestamp_s)} into the session`;
   downloads($("viewer-downloads"), entry);
-  drawOverlay($("viewer-overlay"), annotationTargets(entry, state.report?.intent), entry.width, entry.height);
-  $("viewer-overlay").toggleAttribute("hidden", !$("show-highlights").checked);
-  text("viewer-annotations", annotationText(entry, state.report?.intent));
+  const targets = annotationTargets(entry, state.report?.intent);
+  drawOverlay($("viewer-overlay"), targets, entry.width, entry.height);
+  $("viewer-overlay").toggleAttribute("hidden", !targets.length || !$("show-highlights").checked);
+  text("viewer-annotations", observationText(entry, state.report?.intent));
   if (!$("image-viewer").open) $("image-viewer").showModal();
 }
 function activityHeading(surface, label, item) {
@@ -205,9 +206,10 @@ function renderPreview(row, item) {
   row.classList.toggle("captured", captured(entry));
   row.querySelector(".saved-marker").hidden = !captured(entry);
   const overlay = row.querySelector("svg");
-  drawOverlay(overlay, annotationTargets(entry, state.report?.intent), entry.width, entry.height);
-  overlay.toggleAttribute("hidden", !$("show-highlights").checked);
-  row.querySelector(".preview-annotations").textContent = annotationText(entry, state.report?.intent);
+  const targets = annotationTargets(entry, state.report?.intent);
+  drawOverlay(overlay, targets, entry.width, entry.height);
+  overlay.toggleAttribute("hidden", !targets.length || !$("show-highlights").checked);
+  row.querySelector(".preview-annotations").textContent = observationText(entry, state.report?.intent);
 }
 function renderAction(row, item) {
   if (row.dataset.revision === item.revision) return;
@@ -217,7 +219,8 @@ function renderAction(row, item) {
   row.dataset.status = event.status;
   let label, detail = "", saved = false;
   if (item.kind === "model") {
-    label = item.noPhoto ? "Keep watching" : event.status === "completed" ? "Scene evaluated" : "Evaluate scene";
+    label = event.decision_error ? "Capture decision needs correction"
+      : item.noPhoto ? waitReasonText(item.entry) || "Keep watching" : event.status === "completed" ? "Scene evaluated" : "Evaluate scene";
     detail = event.status === "checking" ? "Preparing to evaluate the latest preview"
       : event.status === "started" ? "Evaluating the scene…"
       : event.status === "completed" ? (item.noPhoto ? "No photograph requested · " : "") + `${event.latency_s.toFixed(1)} sec`
@@ -333,7 +336,8 @@ function renderMonitor() {
   show("stop", active);
   $("stop").disabled = stopping || pending || !connected;
   show("new-session", !active);
-  text("active-instruction", report.request || state.intent?.request || $("instruction").value);
+  text("active-instruction", report.intent?.condition ||
+    (state.intent?.status === "approved" ? state.intent.condition : "") || report.request || state.intent?.request || $("instruction").value);
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (active ? "Connecting…" : "Not connected"));
   text("preview-count", entries.length);
@@ -376,10 +380,11 @@ function render() {
   if (showingMonitor && !reviewing) {
     renderMonitor();
     const intent = state.report?.intent;
-    show("highlight-control", Boolean(intent)); show("approved-intent", Boolean(intent));
+    show("highlight-control", entries().some(entry => annotationTargets(entry, intent).length));
+    show("approved-intent", Boolean(intent));
     if (intent) {
       text("approved-condition", intent.condition);
-      $("approved-targets").replaceChildren(...intent.targets.map(t => element("li", "", `${t.label} · ${t.mode === "fixed" ? "Fixed area" : "Object"} — ${t.relevance}`)));
+      $("approved-targets").replaceChildren(...intent.targets.map(t => element("li", "", t.label)));
     }
     if ($("image-viewer").open && viewerFrameId !== null) openImage(viewerFrameId);
   }

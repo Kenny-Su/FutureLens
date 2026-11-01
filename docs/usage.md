@@ -13,10 +13,17 @@ conversation. Every observation adds a new preview, freshness and cooldown state
 and latest factual capture outcome. Claude can list history, retrieve earlier images,
 request a photograph, or change the automatic preview interval. An ordinary end
 of turn finishes the observation without shooting and keeps the current interval.
-When no action is needed, Claude returns a structured **wait** response with current
-intent annotations, without a tool call; the host schedules the next preview automatically. Repeating the current interval
+When no action is needed, Claude returns a structured **wait** response with a current
+capture-condition assessment and a waiting reason, without a tool call; the host schedules the next preview automatically. Repeating the current interval
 is recorded as unchanged, preserves the last actual interval change, and ends the
-observation without another inference. No explanations are required.
+observation without another inference. A met condition requires a `shoot` call when
+a requested photo is still due. Waiting or changing the interval must identify an
+unmet/uncertain condition, an already photographed occurrence or quantity, or an active
+capture cooldown. The server checks that reason against the assessment and session
+facts. An inconsistent decision gets one correction opportunity on the same frame,
+within the existing freshness and six-call limits; unresolved decisions skip the
+observation. A met assessment alone never triggers the shutter. Preview captions show
+whether a photo was saved, skipped, or not requested, and why the agent is waiting.
 Haiku uses its standard API effort (**`medium`**)
 with **adaptive thinking**. Thinking summaries are omitted from responses; signed
 thinking and redacted-thinking blocks are preserved unchanged across observations.
@@ -24,7 +31,7 @@ Older context is summarized using Anthropic's native on-demand compaction; recen
 observations retain their original images, thinking, and tool results. The output
 limit is **8,192 tokens**, shared by reasoning and the response. Ordinary inference
 refusals, truncated or invalid turn structures, and API failures end monitoring.
-Invalid or missing localization snapshots skip the action and continue with the next observation.
+Invalid or missing capture assessments skip the action and continue with the next observation.
 Compaction failures preserve the old context and allow observations to continue.
 
 ## Camera compatibility
@@ -135,16 +142,26 @@ are controlled in the browser.
    does not repeatedly reopen the same error. Runtime and API configuration are
    validated at startup without permanent status panels.
 3. **Review intent** acquires a fresh reference with capture disabled and asks Claude
-   for an interpretation. Review the capture condition and labeled regions. Move or
-   resize boxes, draw or remove targets, edit labels and relevance, and select
-   **Object** (relocate each observation) or **Fixed area** (keep image coordinates).
-   Arrow keys move a selected box, Shift + arrows resize, and Delete removes it.
-   Use **Not visible** for an object without a known reference location.
-   Corrections save automatically; **Update interpretation** sends saved corrections
-   and your text feedback for another proposal. **Refresh preview** replaces the
-   reference and requires another review. The camera is released during review.
+   to explain when it will fire the shutter. The **Conversation**
+   lets you correct details, answer focused questions, or ask what would happen in
+   a particular scene. Each reply uses the earlier exchange and saved reference.
+   The review has a preview and a conversation: the agent explains the shutter
+   condition directly in a short reply and refers to any highlighted subjects there.
+   The agent asks a question only when an ambiguity changes the capture decision.
+   The preview is the agent's whiteboard. It may highlight visible details to
+   illustrate its explanation; highlights are optional and read-only. Correct a
+   misunderstanding in words, and the next reply can change or clear the highlights.
+   Subjects not visible yet are described in the condition, without placeholder
+   objects or invented boxes. A text-only interpretation can be approved.
+   Enter sends a message; Shift + Enter adds a line. Approval waits for the latest reply and any unresolved
+   clarification. A failed reply can be retried without losing the exchange.
+   **Refresh preview** acquires a new reference, preserves the conversation and
+   agreed constraints, and refreshes any illustrative highlights for another review.
+   The conversation survives browser refreshes. The camera is released during review.
    **Approve and start** commits the displayed interpretation and begins monitoring
-   from a fresh frame. Approval is mandatory for every session.
+   from a fresh frame. Approval is mandatory for every session. The boxes align the
+   photographer and agent on the intended subjects and condition before monitoring;
+   monitoring evaluates the condition without producing target locations or visibility lists.
 4. Monitoring opens a vertical **Session activity** stream. Previews,
    scene evaluations, tool calls, and context compaction appear as peers in time
    order. Timestamps are relative to the start of the session. Progress updates
@@ -157,9 +174,11 @@ are controlled in the browser.
    returned thumbnails and links back to the original previews. Scrolling upward
    preserves your position while monitoring continues. **Return to latest** resumes
    following new previews and actions. Evaluation limits, expired previews, and
-   failures have distinct outcomes. **Show intent highlights** controls overlays on
-   previews and the enlarged viewer. **Approved interpretation** shows the locked
+   failures have distinct outcomes. Previews and the enlarged viewer show the condition
+   assessment and capture outcome. **Approved interpretation** shows the locked
    condition and target definitions. Stop and start a reviewed session to change them.
+   Historical reports with observation annotations retain **Show intent highlights**
+   for their recorded boxes; new sessions do not show tracking overlays.
 6. A photograph's preparation, shutter, and download statuses update its tool-call
    entry. **Photo saved** and green preview markers require a confirmed download.
    Download links on the photo action provide the original JPEG, HEIF, RAW, or paired files.
@@ -203,8 +222,9 @@ always automatic; there is no mode selector or manual interval setting.
    observation's final capture or interval-change result.
 
 **Auto mode:** each new session starts at **60 seconds**. Claude calls
-`set_preview_interval(seconds)` only when a different interval is needed, within
-the **10 to 300 second** bounds. No reason is requested. The guidance is to wait longer when history shows a
+`set_preview_interval` only when a different interval is needed, within
+the **10 to 300 second** bounds. Alongside `seconds`, it supplies the current snapshot
+and a reason no photograph is due. The guidance is to wait longer when history shows a
 stable scene far from the target, and check sooner as the desired moment approaches.
 Claude can compare images already in context or retrieve missing images to assess change. The current interval is
 included in every observation's context and persists until a valid tool call
@@ -253,7 +273,10 @@ shutter command, or changes to capture settings. The check saves a local preview
 | `list_history` | Optional `start_s`, `end_s`, `cursor`, `limit` | Earlier previews, newest first: IDs, timestamps, capture facts, and `next_cursor`. Defaults to 20, maximum 50. Time filters are inclusive seconds since monitoring began. |
 | `get_history` | `frame_ids`: one to eight distinct earlier IDs | Actual images, timestamps, and factual capture outcomes. |
 | `shoot` | Current observation `snapshot` | Downloaded, skipped, or failed capture outcome; always finishes the observation. |
-| `set_preview_interval` | Integer `seconds` (10–300) and current observation `snapshot` | Changes the persistent preview interval and finishes the observation without a photograph or another inference. The interval stays in effect until changed. Invalid arguments return a tool error the model can correct within its remaining calls. |
+| `set_preview_interval` | Integer `seconds` (10–300), current observation `snapshot`, and `wait_reason` | Changes the persistent preview interval and finishes the observation without a photograph or another inference. The interval stays in effect until changed. Invalid arguments return a tool error the model can correct within its remaining calls. |
+
+An observation `snapshot` contains only `frame_id`, `intent_revision`, and `condition`
+(`met`, `unmet`, or `uncertain`). It has no target list or coordinates.
 
 History tools can access only earlier previews in the current session. They accept
 IDs, never arbitrary file paths. Invalid history requests produce a tool error the
@@ -270,12 +293,22 @@ Interval changes are also saved in each run's transcript and activity trace.
 each observation includes `next_preview_interval_s`. Refreshing the interface restores these
 values from the running server's report. Stop and preview freshness still take
 precedence over scheduling decisions.
-The review endpoint `/api/intent/prepare` accepts only `request`.
-`/api/intent/update` accepts `intent_id`, `revision`, and a `plan` containing the
-condition and targets; `/api/intent/refine` accepts the identity/revision and `feedback`.
+The review endpoint `/api/intent/prepare` accepts `request` for a new review, or
+`intent_id` and `revision` to refresh the reference while retaining the discussion.
+`/api/intent/refine` accepts the identity/revision and text in `feedback`. An empty
+string retries a failed reply; otherwise a message is required. It saves the user
+turn and replays the conversation with the reference. Each structured reply contains
+`reply`, a complete `condition`, `question` (empty when no material clarification
+remains), and `targets` with the full set of optional AI highlights. Both the first
+interpretation and later replies use the same schema and pixel validation.
+Only the conversational reply and question are displayed during review. The saved
+condition must faithfully restate the shutter rule explained there.
+Pending or failed replies set `condition_stale` and cannot be approved. Manual
+geometry/condition editing and the former `/api/intent/update` endpoint are removed.
 `/api/intent/cancel` accepts the identity/revision. `/api/state` includes the current
 revisioned draft. `/api/start` accepts only `intent_id` and `revision`, requires a ready
-review, and commits an immutable approved snapshot. Direct instruction-only starts,
+review with a current condition, no unanswered question, and no pending reply,
+and commits an immutable approved snapshot. Direct instruction-only starts,
 stale revisions, and reused approvals are rejected. Drafts survive browser refreshes;
 a server restart requires a new review. Former settings such as
 `preview_mode`, `interval`, `duration_minutes`, `max_shots`, and `max_requests` are
@@ -290,21 +323,25 @@ image, explicitly distinguished from current evidence. Reference images count to
 capacity but do not increment observation counts. Previews accumulate in the session conversation, with automatic prompt
 caching enabled. The entire local archive remains available after compaction.
 
-### Intent artifacts and highlights
+### Intent artifacts and review highlights
 
-Review folders contain `reference.jpg` and revisioned `intent.json`. Each approved
-session stores `intent.json` and `intent-reference.jpg`; its report includes the
-approved condition and targets. Each observation stores `annotations_status` and
-its frame-bound `annotations` (or null when unavailable).
+Review folders contain `reference.jpg` and revisioned `intent.json`, including the
+conversation, each assistant reply's highlights and reference ID, and any pending
+clarification. Each approved session stores `intent.json` and `intent-reference.jpg`; its report includes the
+approved condition and optional reference highlights. The intent has one `condition` explanation;
+`targets` may be empty. Each highlight contains only `id`, `label`, and a finite,
+in-bounds `box` in normalized coordinates. Unseen subjects are described in words.
+Each observation stores `assessment_status` and a frame-bound `assessment` containing only the frame ID, intent revision, and
+condition result (or null when unavailable). Review boxes stay attached to the
+reference image and are not copied onto monitoring previews.
 
-Model boxes use absolute pixels in the exact image dimensions sent to the API.
-The host validates and normalizes them to 0–1 for storage and display. Fixed areas
-use approved coordinates; object locations are evaluated anew on each sampled
-preview. Absent and uncertain objects have no displayed box. Highlights describe
-the agent's interpretation, and the full scene remains available for evaluation.
-Spatial localization is approximate. Fixed areas assume stable camera framing;
-refresh the reference after reframing during setup. Actual localization accuracy
-and recognition need field testing.
+During review, model boxes use absolute pixels in the exact image dimensions sent
+to the API. The host validates and normalizes them to 0–1 for storage and display.
+The approved reference, optional highlights, and complete shutter condition remain
+in monitoring context, including after compaction. Only the capture-condition assessment is requested for each new
+preview; no target-tracking output or annotation-only inference is required.
+Refresh the reference after reframing
+during setup. Recognition accuracy still needs field testing.
 
 ### Session context compaction
 
@@ -328,7 +365,7 @@ evidence: missing visual details must be retrieved with `get_history`. Only a va
 signed compaction block replaces the old prefix. The block and retained messages
 are passed back unchanged; subsequent compaction includes the previous summary.
 Compaction omits the observation JSON response schema and retains the signed-summary
-protocol. An empty ordinary end turn produces unavailable annotations without adding
+protocol. An empty ordinary end turn produces an unavailable assessment without adding
 an empty assistant message to later requests.
 
 Compaction runs **before fetching the next preview**, with a 90-second request timeout.
@@ -395,13 +432,13 @@ Summary text and thinking blocks remain in local transcripts, outside the UI sta
 ## Capture behavior
 
 A `shoot` tool call requests one photo of the newest observation. The application
-rejects it unless a validated snapshot identifies the current frame, approved revision,
-and every approved target, with capture condition **met**. It also rejects it when
+rejects it unless a validated snapshot identifies the current frame and approved
+revision, with capture condition **met**. It also rejects it when
 Stop has been requested, the preview is older than **30 seconds**, or the capture
 cooldown is active. Ambiguous identity that prevents evaluating the condition is
 reported as **uncertain**; monitoring keeps checking. Confirmed absence can satisfy
-a negative condition such as an empty chair. Missing or invalid annotations never
-reuse an earlier object location or authorize capture.
+a negative condition such as an empty chair. Missing or invalid assessments never
+reuse an earlier condition result or authorize capture.
 Freshness includes preview retrieval, token counting, and inference time. It is
 checked again immediately before shutter preparation, and the remaining allowance
 is passed to the helper so autofocus cannot silently use up the deadline.

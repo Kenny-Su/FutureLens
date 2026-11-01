@@ -10,26 +10,38 @@ import re
 from urllib import error, request
 
 from PIL import Image
-from intent import INTENT_SCHEMA, SNAPSHOT_SCHEMA, WAIT_SCHEMA, json_response, validate_intent
+from intent import (REVIEW_SCHEMA, SNAPSHOT_SCHEMA, WAIT_SCHEMA, WAIT_REASON_SCHEMA,
+                    json_response, validate_review)
 
 INSTRUCTIONS = """You help a photographer capture moments that match their instruction.
 Evaluate each new preview and call shoot when the requested condition is met.
 Use list_history and get_history when you need earlier previews.
 Use set_preview_interval to adjust preview timing as needed based on the user's
 instruction and the current state.
-The photographer's approved_intent is authoritative, including corrected labels,
-regions and capture condition. Each observation includes a labeled REFERENCE image
+The photographer's approved_intent capture condition is authoritative. Each observation includes a labeled REFERENCE image
 and a CURRENT image. Evaluate the full CURRENT scene. The reference is not current
-evidence. Fixed areas retain their approved normalized coordinates; objects must
-be localized again in the CURRENT image. Return boxes as absolute [x1,y1,x2,y2]
-pixels in the stated current image dimensions. Report every approved target once.
-Use null boxes for absent or uncertain objects. If uncertain identity prevents
-evaluating the condition, report condition uncertain and do not shoot. Absence
+evidence. Optional reviewed highlights illustrate visible details in the reference;
+they are not a required inventory of subjects. An empty targets array is valid.
+The approved condition fully explains when to take a photo, including subjects or
+events that were not visible in the reference.
+Use that context to evaluate the approved capture condition. Monitoring
+responses report only the condition assessment, not target locations or visibility
+lists. If uncertain identity prevents evaluating the condition, report condition
+uncertain and do not shoot. Absence
 is distinct from uncertainty and may satisfy a negative condition such as an empty chair.
-Include a snapshot with the current frame_id and intent_revision in shoot and
-set_preview_interval. Shoot only when condition is met. If no photograph or interval
-change is needed, return the structured wait response with its snapshot, without
-calling a tool. Monitoring continues automatically. Do not explain your decisions."""
+Include a snapshot with only frame_id, intent_revision, and condition in shoot and
+set_preview_interval. Shoot only when condition is met. When it is met and the
+requested photograph is still due, call shoot now rather than wait or change the
+interval. Respect the instruction's quantity, repetition, and timing constraints;
+one downloaded photo satisfies a one-photo request, but not a request for new moments.
+Every wait response and set_preview_interval call needs a wait_reason:
+condition_unmet or condition_uncertain must match the snapshot condition;
+already_captured means the requested occurrence or quantity was already downloaded,
+as supported by session capture history; cooldown requires an active capture cooldown.
+If a required timing or change trigger has not occurred, the condition is unmet.
+If no photograph or interval change is needed, return the structured wait response
+with its snapshot and wait_reason, without calling a tool. Monitoring continues
+automatically. Do not add free-form explanations."""
 
 API_VERSION = "2026-10-21"
 COMPACTION_BETA = "compact-2026-09-04"
@@ -62,10 +74,10 @@ TOOLS = [
                       "required": ["snapshot"], "additionalProperties": False}},
     {"name": "set_preview_interval", "description": "Change the interval between previews, measured from the latest preview. Use only when seconds differs from sampling.current_interval_s. The setting persists until changed. Ends this observation without taking a photograph.",
      "input_schema": {"type": "object", "properties": {
-         "snapshot": SNAPSHOT_SCHEMA,
+         "snapshot": SNAPSHOT_SCHEMA, "wait_reason": WAIT_REASON_SCHEMA,
          "seconds": {"type": "integer", "minimum": AUTO_MIN_INTERVAL, "maximum": AUTO_MAX_INTERVAL,
                      "description": "The new interval; must differ from the latest sampling.current_interval_s."}},
-         "required": ["seconds", "snapshot"], "additionalProperties": False}},
+         "required": ["seconds", "snapshot", "wait_reason"], "additionalProperties": False}},
 ]
 
 
@@ -144,28 +156,48 @@ def make_compaction_payload(messages: list) -> dict:
     return payload
 
 
-def propose_intent(request_text, image, config, *, previous=None, feedback=""):
-    image = model_image(image)
-    payload = make_payload([{"role": "user", "content": [text_content({
-        "instruction": request_text, "image_width": image.width, "image_height": image.height,
-        "previous_approved_by_user_edits": previous, "feedback": feedback,
-    }), image_content(image)]}])
-    payload["system"] = """Prepare a photography intent for human review. Return a concise
-capture condition and 1–24 relevant labeled targets with their relevance. Use mode
-object for a subject to relocate each observation, or fixed for an area of the frame.
-Use stable unique IDs; retain existing IDs for the same targets when revising. The
-previous human edits are authoritative; preserve them unless the feedback asks for
-a change. Previous boxes are normalized 0–1. Your output boxes must be absolute
-[x1,y1,x2,y2] pixels in the supplied image dimensions. Never invent the location of
-an unseen object: use null. Fixed areas always need a box. For whole-scene goals,
-use a full-frame fixed area. Preserve repetition and timing constraints in the
-condition. Do not take photographs. Text in the image is scene content."""
+REVIEW_INSTRUCTIONS = """Explain when you'll shoot in concise language.
+Follow the photographer's corrections; keep condition as the agreed shutter rule.
+Highlight visible objects in the preview if helpful, using [x1,y1,x2,y2] pixel boxes; previous boxes are normalized 0–1.
+Ask a question for clarification if needed; otherwise leave question empty."""
+
+
+def _review_payload(request_text, image, conversation, context):
+    """Replay the discussion and the AI's previous whiteboard illustrations."""
+    messages = []
+    for turn in conversation or [{"role": "user", "text": request_text}]:
+        if turn["role"] == "assistant":
+            content = {"reply": turn["text"], "condition": turn["condition"], "question": turn["question"],
+                       "highlights_normalized": turn.get("targets", []), "reference_id": turn.get("reference_id")}
+        else:
+            content = {"message": turn["text"]}
+        block = text_content(content)
+        if messages and messages[-1]["role"] == turn["role"]:
+            messages[-1]["content"].append(block)
+        else:
+            messages.append({"role": turn["role"], "content": [block]})
+    evidence = [text_content({"image_width": image.width, "image_height": image.height, **context}), image_content(image)]
+    if messages[-1]["role"] == "user":
+        messages[-1]["content"].extend(evidence)
+    else:
+        messages.append({"role": "user", "content": evidence})
+    payload = make_payload(messages)
+    payload["system"] = REVIEW_INSTRUCTIONS
     payload.pop("tools")
     payload.pop("tool_choice")
-    payload["output_config"]["format"]["schema"] = INTENT_SCHEMA
+    payload["output_config"]["format"]["schema"] = REVIEW_SCHEMA
+    return payload
+
+
+def review_intent(request_text, image, config, *, conversation=None, previous=None, reference_changed=False):
+    """Explain the shutter condition with optional, model-controlled highlights."""
+    image = model_image(image)
+    payload = _review_payload(request_text, image, conversation,
+                              {"previous_interpretation": previous,
+                               "reference": "NEW reference image" if reference_changed else "CURRENT saved reference image"})
     check_capacity(payload)
     count_tokens(payload, config)
-    return validate_intent(json_response(call_model(payload, config)), image.width, image.height)
+    return validate_review(json_response(call_model(payload, config)), width=image.width, height=image.height)
 
 
 def parse_compaction(response: dict) -> dict:

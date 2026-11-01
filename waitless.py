@@ -13,7 +13,7 @@ from camera import SonyCamera, CameraError, DEFAULT_HELPER
 from agent import (SessionAgent, COMPACT_INPUT_TOKENS, COMPACT_REQUEST_BYTES, COMPACT_IMAGES,
                    KEEP_OBSERVATIONS, COMPACTION_RETRY_SECONDS)
 from history import Preview, PreviewArchive, AgentJournal, capture_outcome, append_json
-from intent import ApprovedIntent, json_response, validate_snapshot
+from intent import ApprovedIntent, json_response, validate_snapshot, validate_wait_reason
 from model import (API_ENDPOINT, INSTRUCTIONS, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES, MAX_INPUT_TOKENS,
                    ApiError, CapacityReached, call_model, check_capacity, count_tokens, image_content,
                    load_config, parse_compaction, response_usage, text_content, validate_config, MAX_CALLS_PER_OBSERVATION,
@@ -82,8 +82,8 @@ class Monitor:
         statuses = {"user_stop": "skipped_user_stop", "stale_preview": "skipped_stale_frame"}
         if reason:
             entry["capture_status"] = statuses[reason]
-        elif entry["annotations"]["condition"] != "met":
-            entry["capture_status"] = ("skipped_intent_uncertain" if entry["annotations"]["condition"] == "uncertain"
+        elif entry["assessment"]["condition"] != "met":
+            entry["capture_status"] = ("skipped_intent_uncertain" if entry["assessment"]["condition"] == "uncertain"
                                        else "skipped_condition_unmet")
         elif time.monotonic() - self.last_capture < self.settings.cooldown:
             entry["capture_status"] = "skipped_cooldown"
@@ -138,6 +138,7 @@ class Monitor:
         entry["context_revision"] = self.agent.revision
         active = None
         outcome = "error"
+        decision_corrections = 0
         journal.message({"role": "system", "content": [{"type": "text", "text": INSTRUCTIONS}]})
         initial = {"user_request": self.settings.request, "preview": preview.metadata(),
                    "session": self.current_state(preview, 0),
@@ -155,7 +156,7 @@ class Monitor:
             text_content({"image": "REFERENCE", "captured_at": self.intent["reference_at"]}),
             image_content(self.reference.image()), text_content({"image": "CURRENT", "frame_id": preview.id}),
             image_content(current_image)]}
-        entry.update(annotations=None, annotations_status="pending")
+        entry.update(assessment=None, assessment_status="pending")
         self.append_message(message, journal, [self.reference, preview])
         journal.event("run", "started", "run", outcome="saved")
         try:
@@ -203,21 +204,55 @@ class Monitor:
                     try:
                         if call is None:
                             end = json_response(response)
-                            if not isinstance(end, dict) or set(end) != {"action", "snapshot"} or end["action"] != "wait":
+                            if (not isinstance(end, dict) or end.get("action") != "wait"
+                                    or "snapshot" not in end or set(end) - {"action", "snapshot", "wait_reason"}):
                                 raise ValueError("Missing wait observation snapshot.")
                             snapshot = end["snapshot"]
                         else:
                             snapshot = call["input"].get("snapshot")
-                        entry["annotations"] = validate_snapshot(snapshot, self.intent, preview.id, current_image.size)
-                        entry["annotations_status"] = "available"
-                        self.publish()
+                        assessment = validate_snapshot(snapshot, self.intent, preview.id)
                     except ValueError as exc:
-                        entry.update(annotations=None, annotations_status="unavailable", annotation_error=str(exc))
+                        entry.update(assessment=None, assessment_status="unavailable", assessment_error=str(exc))
                         if call:
                             self.append_message({"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"],
                                 "is_error": True, "content": [text_content({"error": str(exc), "executed": False})]}]}, journal)
-                        outcome = "invalid_annotations"
+                        outcome = "invalid_assessment"
                         break
+                    if call is None or call["name"] == "set_preview_interval":
+                        try:
+                            state = self.current_state(preview, entry["model_calls"])
+                            wait_reason = validate_wait_reason(
+                                (end if call is None else call["input"]).get("wait_reason"), assessment["condition"],
+                                photos_taken=state["photos_taken"], cooldown_remaining_s=state["cooldown_remaining_s"])
+                        except ValueError as exc:
+                            entry.update(assessment=None, assessment_status="pending", decision_error=str(exc))
+                            entry.pop("wait_reason", None)
+                            # Correct a contradictory decision once on this same frame. Never
+                            # translate a "met" assessment into a shutter request.
+                            feedback = [text_content({"error": str(exc), "executed": False,
+                                "current_preview_id": preview.id, "session": state,
+                                "instruction": "Reconcile the decision for this CURRENT frame. If the condition is met "
+                                    "and a requested photo is still due, call shoot. Otherwise return a consistent "
+                                    "snapshot and wait_reason. Respect the approved quantity, repetition and timing; "
+                                    "do not repeat an already fulfilled one-photo request."})]
+                            if call:
+                                feedback = [{"type": "tool_result", "tool_use_id": call["id"],
+                                             "is_error": True, "content": feedback}]
+                                journal.event("tool", "failed", "tool:" + call["id"], name=call["name"], error=str(exc))
+                            else:
+                                journal.event("model", "completed", action_id, turn=turn, decision_error=str(exc))
+                            self.append_message({"role": "user", "content": feedback}, journal)
+                            outcome = self.expired(preview) or "invalid_decision"
+                            if decision_corrections or outcome != "invalid_decision" or turn == MAX_CALLS_PER_OBSERVATION:
+                                break
+                            decision_corrections += 1
+                            continue
+                        entry["wait_reason"] = wait_reason
+                    else:
+                        entry.pop("wait_reason", None)
+                    entry.pop("decision_error", None)
+                    entry.update(assessment=assessment, assessment_status="available")
+                    self.publish()
                 if call is None:
                     outcome = self.expired(preview) or "no_photo"
                     break
@@ -247,7 +282,7 @@ class Monitor:
                     try:
                         if name == "set_preview_interval":
                             seconds = arguments.get("seconds")
-                            if (set(arguments) != {"seconds", "snapshot"} or type(seconds) is not int
+                            if (set(arguments) != {"seconds", "snapshot", "wait_reason"} or type(seconds) is not int
                                     or not AUTO_MIN_INTERVAL <= seconds <= AUTO_MAX_INTERVAL):
                                 raise ValueError(f"Use only integer seconds from {AUTO_MIN_INTERVAL} to {AUTO_MAX_INTERVAL}.")
                             result = {"previous_seconds": self.report["current_interval_s"],
@@ -286,7 +321,8 @@ class Monitor:
                 journal.event("tool", "failed" if is_error else "skipped" if unchanged_interval else "completed",
                               "tool:" + call_id, name=name, **summary)
                 if is_error and name == "set_preview_interval":
-                    entry.update(annotations=None, annotations_status="pending")
+                    entry.update(assessment=None, assessment_status="pending")
+                    entry.pop("wait_reason", None)
                 active = None
                 if name == "shoot":
                     outcome = entry["capture_status"]
@@ -312,8 +348,9 @@ class Monitor:
             raise
         finally:
             outcome = outcome or "error"
-            if entry.get("annotations_status") == "pending" or outcome in ("run_limit", "error", "invalid_annotations"):
-                entry.update(annotations=None, annotations_status="unavailable")
+            if entry.get("assessment_status") == "pending" or outcome in ("run_limit", "error", "invalid_assessment", "invalid_decision"):
+                entry.update(assessment=None, assessment_status="unavailable")
+                entry.pop("wait_reason", None)
             if active:
                 journal.event(active[0], "skipped", active[1], reason=outcome)
             if entry["run_status"] != "failed":
