@@ -114,7 +114,7 @@ function accept(next) {
   lastSessionError = key;
 }
 
-function renderSetup() {
+function renderCameraStatus() {
   const report = state.report || {};
   const monitoring = state.operation === "monitor";
   const checking = state.operation === "check" || (monitoring && (!report.phase || report.phase === "connecting"));
@@ -126,9 +126,6 @@ function renderSetup() {
   $("camera-dot").className = `dot ${healthy ? "ready" : error || !connected ? "error" : ""}`;
   $("check-camera").disabled = pending || !connected || Boolean(state.operation);
   $("check-camera").title = healthy ? "Last connection check succeeded. Click to check again." : "Check camera connection";
-  // Configuration is validated by the server; failures are shown in the dialog.
-  $("start").disabled = pending || !connected || Boolean(state.operation);
-  show("return-session", Boolean(state.session_id));
 }
 
 function element(tag, className, value) {
@@ -337,7 +334,7 @@ function renderMonitor() {
   $("stop").disabled = stopping || pending || !connected;
   show("new-session", !active);
   text("active-instruction", report.intent?.condition ||
-    (state.intent?.status === "approved" ? state.intent.condition : "") || report.request || state.intent?.request || $("instruction").value);
+    (state.intent?.status === "approved" ? state.intent.condition : "") || report.request || state.intent?.request || "");
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (active ? "Connecting…" : "Not connected"));
   text("preview-count", entries.length);
@@ -372,11 +369,10 @@ function updateClock() {
 function render() {
   if (!state) return;
   const reviewing = state.intent && !["approved", "cancelled"].includes(state.intent.status);
-  show("setup", !showingMonitor && !reviewing);
-  show("intent-review", Boolean(reviewing));
+  show("intent-review", !showingMonitor || Boolean(reviewing));
   show("monitor", showingMonitor && !reviewing);
-  renderSetup();
-  review.render(state, connected);
+  renderCameraStatus();
+  review.render(state, connected, pending);
   if (showingMonitor && !reviewing) {
     renderMonitor();
     const intent = state.report?.intent;
@@ -390,15 +386,13 @@ function render() {
   }
 }
 
-$("session-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const data = Object.fromEntries(new FormData(event.target));
-  if (await command("/api/intent/prepare", data)) { showingMonitor = false; render(); window.scrollTo(0, 0); }
-});
 $("show-highlights").addEventListener("change", () => render());
 $("check-camera").addEventListener("click", () => command("/api/check"));
 $("stop").addEventListener("click", () => command("/api/stop"));
-$("new-session").addEventListener("click", () => { showingMonitor = false; notice(""); render(); window.scrollTo(0, 0); });
+$("new-session").addEventListener("click", () => {
+  showingMonitor = false; notice(""); render(); window.scrollTo(0, 0);
+  command("/api/check");
+});
 $("return-session").addEventListener("click", () => { showingMonitor = true; render(); });
 $("go-latest").addEventListener("click", () => {
   following = true;
@@ -424,7 +418,7 @@ async function poll() {
     const next = await api("/api/state");
     if (connectionProblemReported) { connectionProblemReported = false; notice(""); }
     // Do not let an older polling response replace a just-completed command.
-    if (!pending && !review.saving && !review.busy && generation === commandGeneration) {
+    if (!pending && !review.busy && generation === commandGeneration) {
       accept(next);
       if (!checkedOnLoad) {
         checkedOnLoad = true;

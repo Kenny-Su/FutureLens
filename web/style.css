@@ -20,6 +20,7 @@
 .review-grid { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(340px,1fr); gap:28px; align-items:start; margin-top:28px; }
 .review-visual { position:sticky; top:20px; display:grid; gap:12px; }
 .review-visual .image-surface { border:1px solid var(--border); border-radius:12px; overflow:hidden; min-height:180px; }
+.preview-placeholder { display:grid; place-items:center; aspect-ratio:16/9; padding:24px; color:var(--muted); text-align:center; }
 .review-image-toolbar { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin:10px 0; }
 .conversation-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
 .conversation-heading h2 { font-size:14px; font-weight:600; margin:0; }
@@ -177,21 +178,6 @@ main {
   margin:0 auto;
 }
 
-#setup { max-width:760px; margin:48px auto 0; }
-
-#setup-title { font-size:24px; line-height:1.25; font-weight:500; letter-spacing:-.6px; margin-bottom:20px; }
-
-.setup-card {
-  border:1px solid var(--border);
-  background:var(--panel);
-  border-radius:16px;
-  overflow:hidden;
-}
-
-.setup-card {
-  padding:26px 28px;
-}
-
 textarea {
   resize:vertical;
   width:100%;
@@ -210,8 +196,6 @@ textarea {
 textarea::placeholder {
   color:#747e72;
 }
-
-#return-session { margin-right:auto; }
 
 .form-actions {
   margin-top:16px;
@@ -408,17 +392,12 @@ textarea::placeholder {
   .topbar { padding:0 30px; }
   main { padding:0 28px 36px; }
 
-  .setup-card { padding:22px; }
-
   .session-summary { grid-template-columns:1fr; }
   .session-metrics { justify-content:space-between; }
 }
 @media(max-width:760px) {
   .topbar { padding:0 22px; height:64px; }
   main { padding:0 20px 28px; }
-  #setup { margin-top:28px; }
-  #setup-title { font-size:22px; }
-
   .monitor-header { align-items:flex-start; padding:28px 0 22px; }
   .monitor-header h1 { font-size:26px; }
   .monitor-actions { gap:10px; flex-direction:column; align-items:flex-end; }
@@ -438,7 +417,6 @@ textarea::placeholder {
   .activity-detail { font-size:11px; }
 }
 @media(max-width:420px) {
-  .setup-card { padding:20px 16px; }
   .form-actions { gap:8px; }
   .form-actions .button { padding:12px; }
 

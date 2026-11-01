@@ -128,21 +128,24 @@ or `--port 8766` to choose another port. Keep the terminal running. This command
 only launches the interface; instructions, settings, connection checks, and monitoring
 are controlled in the browser.
 
-1. Enter an instruction under **Describe the moment**. **Preview timing** is automatic:
+1. The **Align on the moment** page shows a camera preview on the left and a
+   conversation on the right. Reply to **What moment should I wait for?** with your
+   instruction; the same conversation continues through review and approval.
+   **Preview timing** is automatic:
    Claude chooses intervals between **10 seconds and 5 minutes**.
    There are no session duration, photograph-count, or AI-call budgets. Describe
    whether to capture once or repeat photographs when the condition occurs again.
    Monitoring continues until you press **Stop session**. The header shows elapsed
    time and cumulative preview, photograph, and AI-call counts.
-2. Opening the setup page checks the camera once. The header shows **Camera connected**
+2. Opening the page checks the camera once and displays its preview. The header shows **Camera connected**
    after a successful check; click it (or **Check camera**) to check again.
    This does not call Claude, enable capture, or take a photo. The status reflects
    the last check, not continuous USB detection. Monitoring checks the connection again.
    Connection and startup errors appear in a dismissible dialog; normal polling
    does not repeatedly reopen the same error. Runtime and API configuration are
    validated at startup without permanent status panels.
-3. **Review intent** acquires a fresh reference with capture disabled and asks Claude
-   to explain when it will fire the shutter. The **Conversation**
+3. Sending the first message acquires a fresh reference with capture disabled and
+   asks Claude to explain when it will fire the shutter. The **Conversation**
    lets you correct details, answer focused questions, or ask what would happen in
    a particular scene. Each reply uses the earlier exchange and saved reference.
    The review has a preview and a conversation: the agent explains the shutter
@@ -158,6 +161,7 @@ are controlled in the browser.
    **Refresh preview** acquires a new reference, preserves the conversation and
    agreed constraints, and refreshes any illustrative highlights for another review.
    The conversation survives browser refreshes. The camera is released during review.
+   **Start over** clears the current discussion so you can describe a different moment.
    **Approve and start** commits the displayed interpretation and begins monitoring
    from a fresh frame. Approval is mandatory for every session. The boxes align the
    photographer and agent on the intended subjects and condition before monitoring;

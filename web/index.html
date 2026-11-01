@@ -21,36 +21,26 @@
   </header>
 
   <main>
-    <section id="setup" aria-labelledby="setup-title">
-      <form id="session-form" class="setup-card">
-        <h1 id="setup-title">Describe the moment</h1>
-        <label class="sr-only" for="instruction">Capture instruction</label>
-        <textarea id="instruction" name="request" maxlength="8000" required rows="5"></textarea>
-        <p class="muted small">Review what the agent will watch before monitoring begins.</p>
-        <div class="form-actions"><button id="return-session" type="button" class="text-button" hidden>Return to session</button><button class="button primary" id="start" type="submit">Review intent</button></div>
-      </form>
-    </section>
-
-    <section id="intent-review" aria-labelledby="review-title" hidden>
-      <div class="monitor-header"><div><span class="eyebrow">Before monitoring</span><h1 id="review-title">Align on the moment</h1></div><button id="intent-cancel" class="button secondary" type="button">Back to instruction</button></div>
+    <section id="intent-review" aria-labelledby="review-title">
+      <div class="monitor-header"><div><span class="eyebrow">Before monitoring</span><h1 id="review-title">Align on the moment</h1></div><div class="monitor-actions"><button id="return-session" type="button" class="text-button" hidden>Return to session</button><button id="intent-cancel" class="button secondary" type="button" hidden>Start over</button></div></div>
       <p id="intent-error" class="intent-error" role="alert"></p>
       <div class="review-grid">
         <div class="review-visual">
-          <div id="intent-image-wrap" class="image-surface" hidden><img id="intent-image" alt="Reference preview for the agent’s explanation"><svg id="intent-overlay" class="intent-overlay" role="img" aria-label="AI highlights"></svg></div>
-          <div class="review-image-toolbar"><span id="intent-reference-time" class="muted small"></span><button id="intent-refresh" class="text-button" type="button">Refresh preview</button></div>
+          <div id="intent-image-wrap" class="image-surface"><div id="intent-preview-empty" class="preview-placeholder" role="status">Connecting to camera…</div><img id="intent-image" alt="Camera preview for discussing your photograph" hidden><svg id="intent-overlay" class="intent-overlay" role="img" aria-label="AI highlights" hidden></svg></div>
+          <div class="review-image-toolbar"><span id="intent-reference-time" class="muted small"></span><button id="intent-refresh" class="text-button" type="button" disabled>Refresh preview</button></div>
         </div>
         <section class="review-conversation" aria-labelledby="conversation-title">
           <div class="conversation-heading"><h2 id="conversation-title">Conversation</h2><span class="muted small">No capture during review</span></div>
-          <div id="review-messages" class="review-messages" role="log" aria-label="Intent review conversation" aria-live="polite" aria-relevant="additions" tabindex="0"></div>
+          <div id="review-messages" class="review-messages" role="log" aria-label="Intent review conversation" aria-live="polite" aria-relevant="additions" tabindex="0"><article class="review-message assistant"><span class="message-author">WaitLess</span><p class="message-text">What moment should I wait for?</p></article></div>
           <p id="review-thinking" class="review-thinking muted small" role="status" hidden>Considering your reply…</p>
           <form id="review-composer" class="review-composer">
             <label class="sr-only" for="intent-feedback">Message WaitLess</label>
-            <textarea id="intent-feedback" rows="3" maxlength="8000" placeholder="Correct a detail, answer a question, or ask “what if…”"></textarea>
-            <div class="composer-actions"><button id="intent-refine" class="button secondary" type="submit">Send <span aria-hidden="true">↑</span></button></div>
+            <textarea id="intent-feedback" rows="3" maxlength="8000" placeholder="Describe the moment you want to capture…" disabled></textarea>
+            <div class="composer-actions"><button id="intent-refine" class="button secondary" type="submit" disabled>Send <span aria-hidden="true">↑</span></button></div>
           </form>
         </section>
       </div>
-      <div class="review-footer"><button id="intent-start" class="button primary" type="button" disabled>Approve and start</button></div>
+      <div id="review-footer" class="review-footer" hidden><button id="intent-start" class="button primary" type="button" disabled>Approve and start</button></div>
     </section>
 
     <section id="monitor" aria-labelledby="monitor-title" hidden>

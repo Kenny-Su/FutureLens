@@ -32,9 +32,9 @@ becomes sorting.
 Watching a scene doesn't need to mean taking a full-resolution photograph every
 time. WaitLess separates observation from capture:
 
-1. **Describe your moment.** Use a plain-language instruction about the subject,
-   visibility, or light you want.
-2. **Align on the moment.** Start with the agent's interpretation, then discuss
+1. **Describe your moment.** The camera preview appears beside a conversation
+   asking what moment to wait for. Reply with the subject, visibility, or light you want.
+2. **Align on the moment.** Continue in the same conversation with the agent's interpretation, then discuss
    corrections or “what if” questions alongside the marked reference. It asks
    focused questions when something is unclear and updates the capture condition
    as you talk. The preview is the agent's whiteboard: it can highlight visible

@@ -6,9 +6,9 @@ export class IntentReview {
     Object.assign(this, {request, accept, notify, started, cancelled});
     this.draft = null; this.busy = false;
     this.messageNodes = new Map();
-    $("intent-refresh").addEventListener("click", () => this.perform("/api/intent/prepare", this.identity()));
+    $("intent-refresh").addEventListener("click", () => this.draft
+      ? this.perform("/api/intent/prepare", this.identity()) : this.perform("/api/check", {}));
     $("intent-cancel").addEventListener("click", async () => {
-      $("instruction").value = this.draft.request;
       if (await this.perform("/api/intent/cancel", this.identity())) {
         $("intent-feedback").value = ""; this.cancelled();
       }
@@ -26,43 +26,50 @@ export class IntentReview {
     });
   }
   identity() { return {intent_id: this.draft.id, revision: this.draft.revision}; }
-  render(state, connected = true) {
-    this.connected = connected; this.operation = state.operation;
-    const draft = state.intent;
-    if (!draft || ["approved", "cancelled"].includes(draft.status)) { this.draft = null; return; }
-    if (draft.id !== this.draft?.id) $("intent-feedback").value = "";
+  render(state, connected = true, pending = false) {
+    this.connected = connected; this.operation = state.operation; this.pending = pending;
+    const draft = state.intent && !["approved", "cancelled"].includes(state.intent.status) ? state.intent : null;
+    if (draft?.id !== this.draft?.id) $("intent-feedback").value = "";
     this.draft = draft;
-    $("intent-error").textContent = !connected ? "Connection lost. Your conversation is saved." : draft.error || "";
-    $("intent-image-wrap").hidden = !draft.preview;
-    if (draft.preview && $("intent-image").getAttribute("src") !== draft.preview) $("intent-image").src = draft.preview;
-    $("intent-reference-time").textContent = draft.reference_at ? `Reference captured ${new Date(draft.reference_at).toLocaleTimeString()}` : "Connecting for a reference preview…";
-    if (draft.width && draft.height) {
+    const reference = draft?.preview ? draft : state.camera_check?.preview ? state.camera_check : state.intent;
+    const preview = reference?.preview;
+    const refreshing = state.operation === "check" || draft?.status === "preparing";
+    $("intent-error").textContent = !connected ? "Connection lost. Reconnecting…" : draft?.error || "";
+    $("intent-image").hidden = !preview;
+    $("intent-preview-empty").hidden = Boolean(preview);
+    $("intent-preview-empty").textContent = refreshing ? "Connecting to camera…" : "Connect your camera and refresh the preview.";
+    if (preview && $("intent-image").getAttribute("src") !== preview) $("intent-image").src = preview;
+    $("intent-reference-time").textContent = refreshing ? "Refreshing preview…" : reference?.reference_at
+      ? `Reference captured ${new Date(reference.reference_at).toLocaleTimeString()}` : preview ? "Camera preview" : "";
+    if (draft?.width && draft.height) {
       drawOverlay($("intent-overlay"), draft.targets, draft.width, draft.height);
       $("intent-overlay").setAttribute("aria-label", `AI highlights: ${draft.targets.map(t => t.label).join(", ")}`);
     }
-    $("intent-overlay").toggleAttribute("hidden", !draft.targets.length);
+    $("intent-overlay").toggleAttribute("hidden", !draft?.targets.length);
+    $("intent-cancel").hidden = !draft;
+    $("return-session").hidden = Boolean(draft) || !state.session_id;
+    $("review-footer").hidden = !draft;
+    $("intent-feedback").placeholder = draft ? "Correct a detail, answer a question, or ask “what if…”" : "Describe the moment you want to capture…";
     this.conversation(); this.controls();
   }
   controls() {
-    if (!this.draft) return;
-    const locked = !this.connected || this.busy || Boolean(this.operation);
-    const active = this.draft.status === "ready" && !locked;
+    const locked = !this.connected || this.busy || this.pending || Boolean(this.operation);
+    const active = this.draft?.status === "ready" && !locked;
     const message = $("intent-feedback").value.trim();
-    const retry = this.draft.error && this.draft.pending_message_id;
-    const outdated = this.draft.condition_stale;
-    $("intent-start").disabled = !active || outdated ||
+    const retry = this.draft?.error && this.draft.pending_message_id;
+    $("intent-start").disabled = !active || this.draft.condition_stale ||
       Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft));
-    $("intent-refine").disabled = locked || !this.draft.preview || !(message || retry);
+    $("intent-refine").disabled = locked || (this.draft && !this.draft.preview) || !(message || retry);
     $("intent-refine").textContent = !message && retry ? "Retry reply" : "Send ↑";
-    $("intent-feedback").disabled = locked;
-    $("intent-refresh").disabled = locked || Boolean(message);
-    $("intent-cancel").disabled = !this.connected || this.busy;
-    const thinking = ["preparing", "refining"].includes(this.draft.status);
+    $("intent-feedback").disabled = this.draft ? locked : !this.connected || this.busy;
+    $("intent-refresh").disabled = locked || Boolean(this.draft && message);
+    $("intent-cancel").disabled = !this.connected || this.busy || this.pending;
+    const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;
-    $("review-thinking").textContent = this.draft.status === "preparing" ? "Looking at your reference…" : "Considering your reply…";
+    $("review-thinking").textContent = this.draft?.status === "preparing" ? "Looking at your reference…" : "Considering your reply…";
   }
   conversation() {
-    const log = $("review-messages"), turns = this.draft.conversation;
+    const log = $("review-messages"), turns = this.draft?.conversation || [];
     const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
     const ids = new Set(turns.map(turn => turn.id));
     for (const [id, node] of this.messageNodes) if (!ids.has(id)) { node.remove(); this.messageNodes.delete(id); }
@@ -87,7 +94,9 @@ export class IntentReview {
     if ($("intent-refine").disabled) return;
     const input = $("intent-feedback"), feedback = input.value;
     this.sentMessage = true;
-    if (await this.perform("/api/intent/refine", {...this.identity(), feedback})) {
+    const path = this.draft ? "/api/intent/refine" : "/api/intent/prepare";
+    const data = this.draft ? {...this.identity(), feedback} : {request: feedback};
+    if (await this.perform(path, data)) {
       if (input.value === feedback) input.value = "";
       this.controls();
     }
