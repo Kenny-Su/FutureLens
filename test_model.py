@@ -43,7 +43,7 @@ class ModelTests(unittest.TestCase):
         image = Image.new("RGB", (1920, 1080), "green")
         messages = [{"role": "user", "content": [model.image_content(image)]}]
         payload = model.make_payload(messages)
-        self.assertEqual(payload["model"], "claude-sonnet-5-5")
+        self.assertEqual(payload["model"], "claude-haiku-5-5")
         self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot", "set_preview_interval"])
         self.assertEqual(payload["tool_choice"], {"type": "auto", "disable_parallel_tool_use": True})
         self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
@@ -53,7 +53,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(image.size, (1920, 1080))
         self.assertNotIn("format", payload["output_config"])
         self.assertEqual(payload["thinking"], {"type": "adaptive", "display": "omitted"})
-        self.assertEqual(payload["output_config"]["effort"], "high")
+        self.assertEqual(payload["output_config"]["effort"], "medium")
         self.assertEqual(payload["max_tokens"], 8192)
         messages.append({"role": "assistant", "content": answer("wait")["content"]})
         self.assertEqual(len(payload["messages"]), 1)
@@ -141,7 +141,7 @@ class ModelTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"ANTHROPIC_BASE_URL": "https://example.com/gateway/v1",
                                "ANTHROPIC_MODEL": "other-model"}, clear=True)
-    def test_api_uses_only_anthropic_endpoint_and_sonnet(self):
+    def test_api_uses_only_anthropic_endpoint_and_haiku(self):
         env = self.root / ".env"
         env.write_text('ANTHROPIC_API_KEY=test-key\nANTHROPIC_WORKSPACE_ID=wrkspc_test\n'
                        'ANTHROPIC_BASE_URL=https://example.com/another-gateway/v1\n'
@@ -156,7 +156,7 @@ class ModelTests(unittest.TestCase):
         sent = opener.return_value.open.call_args.args[0]
         self.assertEqual(sent.full_url, "https://api.anthropic.com/v1/messages")
         self.assertEqual(sent.data, model.encode_payload(payload))
-        self.assertEqual(json.loads(sent.data)["model"], "claude-sonnet-5-5")
+        self.assertEqual(json.loads(sent.data)["model"], "claude-haiku-5-5")
         self.assertEqual(sent.get_header("X-api-key"), "test-key")
         self.assertEqual(sent.get_header("Anthropic-version"), model.API_VERSION)
         self.assertEqual(sent.get_header("Anthropic-beta"), model.COMPACTION_BETA)
@@ -167,7 +167,7 @@ class ModelTests(unittest.TestCase):
         ordinary = model.make_payload(messages)
         summary = model.make_compaction_payload(messages)
         self.assertEqual({k: v for k, v in summary.items() if k != "compaction"}, ordinary)
-        self.assertEqual(summary["compaction"]["type"], "summarize")
+        self.assertEqual(summary["compaction"], {"type": "summarize"})
         self.assertNotIn("context_management", summary)
         response = compacted()
         self.assertEqual(model.parse_compaction(response), {"role": "assistant", "content": response["content"]})

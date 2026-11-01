@@ -8,7 +8,7 @@ Run the commands from the repository root. WaitLess runs on macOS 14.1 or later
 one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. WaitLess uses its Messages API with
-**Claude Sonnet 5.5** (`claude-sonnet-5-5`). Each session has one persistent agent
+**Claude Haiku 5.5** (`claude-haiku-5-5`). Each session has one persistent agent
 conversation. Every observation adds a new preview, freshness and cooldown state, history availability,
 and latest factual capture outcome. Claude can list history, retrieve earlier images,
 request a photograph, or change the automatic preview interval. An ordinary end
@@ -17,7 +17,7 @@ When no action is needed, Claude is instructed to reply **No action.** without a
 call; the host schedules the next preview automatically. Repeating the current interval
 is recorded as unchanged, preserves the last actual interval change, and ends the
 observation without another inference. No explanations are required.
-Sonnet uses its standard API effort (**`high`**)
+Haiku uses its standard API effort (**`medium`**)
 with **adaptive thinking**. Thinking summaries are omitted from responses; signed
 thinking and redacted-thinking blocks are preserved unchanged across observations.
 Older context is summarized using Anthropic's native on-demand compaction; recent
@@ -60,7 +60,7 @@ ANTHROPIC_API_KEY=your-key
 ```
 
 The active session conversation, including preview images and any summary, goes directly to
-`https://api.anthropic.com/v1/messages` using `claude-sonnet-5-5`. A capacity check
+`https://api.anthropic.com/v1/messages` using `claude-haiku-5-5`. A capacity check
 sends the same input to `/v1/messages/count_tokens` before each inference or compaction.
 The endpoint and model are fixed in code. Environment variables override `.env`
 for credentials; keys belong in the ignored local `.env` file.
@@ -277,15 +277,14 @@ Image count and byte size include nested history tool results. These are interna
 defaults, not user settings.
 
 When a threshold is reached and there is a legal older prefix to summarize, WaitLess
-sends `compaction: {"type": "summarize"}` to the same Sonnet model. It retains at
+sends `compaction: {"type": "summarize"}` to the same Haiku model. It retains at
 least the **latest four observations** word for word. The split uses a previously
 sent request boundary, with its assistant reply at the start of the retained tail.
 Tool calls and their results stay together. This can retain an extra fragment of
 an older observation to preserve thinking signatures. The system prompt and tool
 definitions remain constant throughout the session.
 
-The summary preserves goals, observations with frame IDs and timestamps, uncertainty,
-interval changes, and factual capture outcomes. It is lossy memory, not image
+Compaction uses Anthropic's default summarization prompt. The summary is lossy memory, not image
 evidence: missing visual details must be retrieved with `get_history`. Only a valid
 signed compaction block replaces the old prefix. The block and retained messages
 are passed back unchanged; subsequent compaction includes the previous summary.
@@ -483,7 +482,7 @@ The activity projection also has dependency-free Node tests for ordering, progre
 updates, capture outcomes, and cross-observation IDs: `node --test test_activity.mjs`.
 Node is only needed to run these developer tests, not to run WaitLess.
 
-[Claude Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/overview),
+[Claude Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/overview),
 [effort](https://platform.claude.com/docs/en/build-with-claude/effort),
 [thinking](https://platform.claude.com/docs/en/build-with-claude/thinking),
 [on-demand compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand),

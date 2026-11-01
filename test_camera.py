@@ -430,9 +430,9 @@ class CameraWorkflowTests(unittest.TestCase):
         counts = [payload for endpoint, payload, _ in self.requests if endpoint == model.TOKEN_COUNT_ENDPOINT]
         for counted, inferred in zip(counts, payloads):
             self.assertEqual(counted, {key: value for key, value in inferred.items() if key != "max_tokens"})
-        self.assertEqual(self.report()["model"], "claude-sonnet-5-5")
+        self.assertEqual(self.report()["model"], "claude-haiku-5-5")
         self.assertEqual(self.report()["model_settings"], {
-            "effort": "high", "thinking": "adaptive", "thinking_display": "omitted",
+            "effort": "medium", "thinking": "adaptive", "thinking_display": "omitted",
             "max_output_tokens": 8192, "automatic_prompt_caching": True,
         })
 

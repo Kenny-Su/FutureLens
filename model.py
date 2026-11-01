@@ -13,10 +13,9 @@ from PIL import Image
 
 INSTRUCTIONS = """You help a photographer capture moments that match their instruction.
 Evaluate each new preview and call shoot when the requested condition is met.
-Follow the requested repetition; avoid unintended duplicate photographs.
 Use list_history and get_history when you need earlier previews.
-Use set_preview_interval to check less often while the scene is stable
-and more often as the requested condition approaches.
+Use set_preview_interval to adjust preview timing as needed based on the user's
+instruction and the current state.
 If no photograph or interval change is needed, reply "No action." without calling
 a tool. Monitoring continues automatically.
 Do not explain your decisions."""
@@ -25,8 +24,8 @@ API_VERSION = "2026-10-21"
 COMPACTION_BETA = "compact-2026-09-04"
 API_ENDPOINT = "https://api.anthropic.com/v1/messages"
 TOKEN_COUNT_ENDPOINT = API_ENDPOINT + "/count_tokens"
-MODEL = "claude-sonnet-5-5"
-EFFORT = "high"  # Sonnet's standard API default.
+MODEL = "claude-haiku-5-5"
+EFFORT = "medium"  # Haiku's standard API default.
 THINKING = {"type": "adaptive", "display": "omitted"}
 MAX_OUTPUT_TOKENS = 8192
 MAX_IMAGES = 600
@@ -120,18 +119,9 @@ def make_payload(messages: list) -> dict:
     }
 
 
-COMPACTION_INSTRUCTIONS = """Summarize this photography session for its continuation.
-Preserve the user's goal and constraints; important observations with frame IDs and timestamps;
-changes toward or away from the requested condition and uncertainties; preview interval changes;
-and factual capture outcomes, distinguishing downloaded photos from requests or unconfirmed captures.
-Keep references to images that may need retrieval. The summary is memory, not image evidence.
-Later host updates supersede old budgets, timing, and capture facts. Do not call tools or request
-photographs. Return only the summary, not an explanation of your reasoning."""
-
-
 def make_compaction_payload(messages: list) -> dict:
     payload = make_payload(messages)
-    payload["compaction"] = {"type": "summarize", "instructions": COMPACTION_INSTRUCTIONS}
+    payload["compaction"] = {"type": "summarize"}
     return payload
 
 

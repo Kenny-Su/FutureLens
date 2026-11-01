@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 from history import append_json, local_message
-from model import (INSTRUCTIONS, COMPACTION_INSTRUCTIONS, COMPACTION_BETA, MODEL, MAX_OUTPUT_TOKENS, check_capacity, make_payload,
+from model import (INSTRUCTIONS, COMPACTION_BETA, MODEL, MAX_OUTPUT_TOKENS, check_capacity, make_payload,
                    make_compaction_payload, parse_compaction, parse_turn, response_usage)
 
 COMPACT_INPUT_TOKENS = 100_000
@@ -25,8 +25,7 @@ class SessionAgent:
         self.log = output / "conversation.jsonl"
         payload = self.payload()
         self.record("session", model=MODEL, system=INSTRUCTIONS, tools=payload["tools"],
-                    thinking=payload["thinking"], output_config=payload["output_config"],
-                    compaction_instructions=COMPACTION_INSTRUCTIONS, beta=COMPACTION_BETA)
+                    thinking=payload["thinking"], output_config=payload["output_config"], beta=COMPACTION_BETA)
 
     def record(self, kind, **details):
         append_json(self.log, {"type": kind, "context_revision": self.revision,
