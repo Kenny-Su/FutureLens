@@ -202,7 +202,7 @@ class SessionManager:
                             if draft["condition"] else draft.get("previous_interpretation"))
                 reply = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
                                       previous=deepcopy(previous), reference_changed=not bool(draft["condition"]))
-            # Validate again at the boundary even when the model adapter is replaced in tests.
+            # Validate model output before replacing the current interpretation.
             reply = validate_review(reply)
             plan = {k: reply[k] for k in ("condition", "targets")}
             draft.update(plan, question=reply["question"], status="ready", revision=draft["revision"] + 1,
