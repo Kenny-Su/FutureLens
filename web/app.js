@@ -12,7 +12,7 @@ const reasons = {
 const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Processing photo", failed_after_shutter: "Save unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_expired_before_shutter: "Capture expired", skipped_user_stop: "Session stopped", skipped_video_end: "Video ended before capture", skipped_condition_unmet: "Capture condition not met" };
 const outcomes = { no_photo: "No photo", stale_preview: "Preview expired", user_stop: "Session stopped", error: "Observation failed", ...captureLabels };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
-let commandGeneration = 0, following = true, viewerFrameId = null;
+let commandGeneration = 0, following = true, viewerFrameId = null, savedOnly = false;
 let connectionProblemReported = false, lastCheckError = null, lastSessionError = null, lastSourceError = null;
 const rows = new Map();
 const previews = new Map();
@@ -212,9 +212,10 @@ function renderPreview(row, item) {
     loadPreview(image, media(entry.preview_file));
     button.append(image, svgNode("svg", {class: "intent-overlay", "aria-hidden": "true"}), element("span", "saved-marker", "✓ Photo saved"));
     button.addEventListener("click", () => openImage(entry.frame_id));
-    surface.append(button, element("p", "preview-annotations muted small"));
+    surface.append(button, element("p", "preview-annotations muted small"), element("div", "download-links"));
     row.append(surface);
   }
+  downloads(row.querySelector(".download-links"), entry);
   row.classList.toggle("captured", captured(entry));
   row.querySelector(".saved-marker").hidden = !captured(entry);
   const overlay = row.querySelector("svg");
@@ -266,7 +267,11 @@ function renderTimeline(observations) {
   const timeline = $("timeline");
   const previousTop = timeline.scrollTop;
   let previousRow = null;
-  for (const item of sessionActivity(observations)) {
+  const items = sessionActivity(observations).filter(item => !savedOnly || (item.kind === "preview" && captured(item.entry)));
+  const visibleIds = new Set(items.map(item => item.id));
+  for (const [id, row] of rows) if (!visibleIds.has(id)) row.remove();
+  timeline.classList.toggle("saved-only", savedOnly);
+  for (const item of items) {
     let row = rows.get(item.id);
     if (!row) {
       row = element("article", `thread-item kind-${item.kind}`);
@@ -287,8 +292,9 @@ function renderTimeline(observations) {
   if (following) followLatest();
   else timeline.scrollTop = previousTop;
   show("go-latest", !following);
-  show("timeline-empty", !observations.length);
-  text("timeline-count", `${observations.length} preview${observations.length === 1 ? "" : "s"} · one continuous session`);
+  const count = savedOnly ? observations.filter(captured).length : observations.length;
+  show("timeline-empty", !count);
+  if (savedOnly) text("timeline-empty", "No photos saved yet. Qualifying moments will collect here for you to review.");
   if ($("image-viewer").open) {
     const entry = observations.find(item => item.frame_id === viewerFrameId);
     if (entry) downloads($("viewer-downloads"), entry);
@@ -314,10 +320,7 @@ function renderMonitor() {
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (scheduled ? demo ? state.source.name : "Camera" : active ? demo ? "Opening video…" : "Connecting…" : "Not connected"));
   text("timeline-empty", demo ? "The first video preview will appear here when monitoring begins." : "The first preview will appear here after the camera connects.");
-  text("preview-count", entries.length);
   text("shot-count", report.photos_taken || 0);
-  text("call-count", report.api_requests || 0);
-  $("call-count").title = "One scene evaluation per preview";
   text("session-detail", failed ? ""
     : stopping ? "Waiting for an active operation to finish. A capture already sent to the camera may still complete."
     : scheduled ? `Starts at ${new Date(report.scheduled_start_at * 1000).toLocaleString()}` : active ? ""
@@ -359,13 +362,18 @@ function render() {
     renderMonitor();
     const intent = state.report?.intent;
     show("highlight-control", entries().some(entry => annotationTargets(entry, intent).length));
-    show("approved-intent", Boolean(intent));
-    if (intent) {
-      text("approved-condition", intent.condition);
-      $("approved-targets").replaceChildren(...intent.targets.map(t => element("li", "", t.label)));
-    }
     if ($("image-viewer").open && viewerFrameId !== null) openImage(viewerFrameId);
   }
+}
+
+for (const [id, onlySaved] of [["view-all", false], ["view-saved", true]]) {
+  $(id).addEventListener("click", () => {
+    savedOnly = onlySaved;
+    $("view-all").setAttribute("aria-pressed", String(!savedOnly));
+    $("view-saved").setAttribute("aria-pressed", String(savedOnly));
+    following = true;
+    renderMonitor();
+  });
 }
 
 $("show-highlights").addEventListener("change", () => render());

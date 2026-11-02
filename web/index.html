@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <title>WaitLess</title>
   <meta name="description" content="Describe the moment you want. WaitLess observes lightweight previews and captures selectively, so you can delegate the waiting.">
   <link rel="stylesheet" href="/style.css">
@@ -22,7 +22,7 @@
 
   <main>
     <section id="intent-review" aria-labelledby="review-title">
-      <div class="monitor-header"><div><span class="eyebrow">Before monitoring</span><h1 id="review-title">Align on the moment</h1></div><div class="monitor-actions"><button id="return-session" type="button" class="text-button" hidden>Return to session</button><button id="intent-cancel" class="button secondary" type="button" disabled>Start over</button></div></div>
+      <h1 id="review-title" class="sr-only">Plan a photograph</h1>
       <p id="intent-error" class="intent-error" role="alert"></p>
       <div class="review-grid">
         <div class="review-visual">
@@ -36,29 +36,28 @@
           </div>
           <div id="intent-image-wrap" class="image-surface"><div id="intent-preview-empty" class="preview-placeholder" role="status">Connect your iPhone or import a video.</div><img id="intent-image" alt="Reference preview for discussing your photograph" hidden><svg id="intent-overlay" class="intent-overlay" role="img" aria-label="AI highlights" hidden></svg></div>
           <div class="review-image-toolbar"><span id="intent-reference-time" class="muted small"></span><button id="intent-refresh" class="text-button" type="button" disabled>Refresh preview</button></div>
-          <div class="schedule-controls" role="group" aria-label="Monitoring timing">
-            <label for="start-delay">Start after <span class="schedule-input"><input id="start-delay" type="number" min="0" max="1440" step="1" value="0" required><span>minutes</span></span></label>
-            <label for="check-interval">Check every <span class="schedule-input"><input id="check-interval" type="number" min="1" max="86400" step="1" value="60" required><span>seconds</span></span></label>
-          </div>
+
         </div>
         <section class="review-conversation" aria-labelledby="conversation-title">
-          <div class="conversation-heading"><h2 id="conversation-title">Conversation</h2><span class="muted small">Monitoring starts after approval</span></div>
+          <div class="conversation-heading"><h2 id="conversation-title" class="sr-only">Planning conversation</h2><div class="review-actions"><button id="return-session" type="button" class="text-button" hidden>Return to session</button><button id="intent-cancel" class="text-button" type="button" disabled>Start over</button></div></div>
           <div id="review-messages" class="review-messages" role="log" aria-label="Intent review conversation" aria-live="polite" aria-relevant="additions" tabindex="0"><article class="review-message assistant"><span class="message-author">WaitLess</span><p class="message-text">What moment should I wait for?</p></article></div>
           <p id="review-thinking" class="review-thinking muted small" role="status" hidden>Thinking…</p>
           <form id="review-composer" class="review-composer">
             <label class="sr-only" for="intent-feedback">Message WaitLess</label>
-            <textarea id="intent-feedback" rows="3" maxlength="8000" placeholder="Message WaitLess…" disabled></textarea>
-            <div class="composer-actions"><button id="intent-refine" class="button secondary" type="submit" disabled>Send <span aria-hidden="true">↑</span></button></div>
+            <textarea id="intent-feedback" rows="3" maxlength="8000" placeholder="Describe the moment you have in mind…" disabled></textarea>
+            <button id="intent-refine" type="submit" aria-label="Send message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
           </form>
         </section>
       </div>
     </section>
 
-    <dialog id="plan-dialog" aria-labelledby="plan-title" aria-describedby="plan-description">
+    <dialog id="plan-dialog" aria-labelledby="plan-title" aria-describedby="plan-condition">
       <h2 id="plan-title">Your shooting plan</h2>
-      <p id="plan-description" class="muted">Review what WaitLess will look for before you begin.</p>
       <p id="plan-condition"></p>
-      <p id="plan-timing" class="muted small"></p>
+          <div class="schedule-controls" role="group" aria-label="Monitoring timing">
+            <label for="start-delay">Start after <span class="schedule-input"><input id="start-delay" type="number" min="0" max="1440" step="1" value="0" required><span>minutes</span></span></label>
+            <label for="check-interval">Check every <span class="schedule-input"><input id="check-interval" type="number" min="1" max="86400" step="1" value="60" required><span>seconds</span></span></label>
+          </div>
       <div class="plan-actions">
         <button id="plan-edit" class="button secondary" type="button" autofocus>Request edits</button>
         <button id="intent-start" class="button primary" type="button" disabled>Confirm and start</button>
@@ -71,21 +70,17 @@
         <div class="monitor-actions"><span id="session-status" class="status-pill"><span class="dot"></span><span id="status-text">Connecting</span></span><button id="stop" class="button secondary" type="button"><span class="stop-square"></span> Stop session</button><button id="new-session" class="button primary" type="button" hidden>New session <span>↗</span></button></div>
       </div>
       <div class="session-summary">
-        <div class="instruction-summary"><span class="eyebrow">Watching for</span><p id="active-instruction"></p><span id="active-camera" class="muted small"></span></div>
+        <div class="instruction-summary"><span class="eyebrow">Watching for</span><p id="active-instruction"></p><span id="active-camera" class="muted small"></span><span class="muted small"> · Every <span id="active-interval">60 sec</span></span></div>
         <div class="session-metrics">
-          <div class="metric"><span>Observations</span><strong id="preview-count">0</strong></div>
           <div class="metric"><span>Photos saved</span><strong id="shot-count">0</strong></div>
-          <div class="metric"><span>AI calls</span><strong id="call-count">0</strong></div>
-          <div class="metric"><span>Preview interval</span><strong id="active-interval">60 sec</strong></div>
         </div>
         <div class="session-timing"><span id="next-check">Connecting to camera…</span><span>Elapsed <span id="elapsed" class="mono">00:00</span></span></div>
         <p id="session-detail" class="muted small"></p>
         <p id="output-path" class="output-path"></p>
-        <details id="approved-intent" hidden><summary>Approved interpretation</summary><p id="approved-condition"></p><ul id="approved-targets"></ul><p class="muted small">To change the interpretation, stop and start a new reviewed session.</p></details>
         <label id="highlight-control" class="highlight-control" hidden><input id="show-highlights" type="checkbox" checked> Show intent highlights</label>
       </div>
       <section class="timeline-section" aria-labelledby="timeline-title">
-        <div class="timeline-header"><div><h2 id="timeline-title">Session activity</h2><span id="timeline-count" class="muted small">Previews and actions, in order</span></div><button id="go-latest" class="text-button" type="button" hidden>Return to latest ↓</button></div>
+        <div class="timeline-header"><div><h2 id="timeline-title" class="sr-only">Session photos</h2><div class="view-switch" role="group" aria-label="Photo view"><button id="view-all" type="button" aria-pressed="true">All previews</button><button id="view-saved" type="button" aria-pressed="false">Saved photos</button></div></div><button id="go-latest" class="text-button" type="button" hidden>Return to latest ↓</button></div>
         <div id="timeline" class="timeline" tabindex="0" aria-label="Session activity. Scroll vertically to browse previews and actions."></div>
         <div id="timeline-empty" class="timeline-empty">The first preview will appear here after the camera connects.</div>
       </section>

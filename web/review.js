@@ -85,7 +85,13 @@ export class IntentReview {
   controls() {
     const locked = !this.connected || this.busy || this.pending || Boolean(this.operation);
     const active = this.draft?.status === "ready" && !locked;
-    const message = $("intent-feedback").value.trim();
+    const composer = $("intent-feedback");
+    if (this.composerValue !== composer.value) {
+      this.composerValue = composer.value;
+      composer.style.height = "auto";
+      composer.style.height = `${Math.min(composer.scrollHeight, 180)}px`;
+    }
+    const message = composer.value.trim();
     const retry = this.draft?.error && this.draft.pending_message_id;
     const timing = this.schedule();
     $("start-delay").disabled = locked;
@@ -94,7 +100,9 @@ export class IntentReview {
     $("intent-start").disabled = !active || !this.hasSource || !this.draft.plan_ready || this.draft.condition_stale ||
       Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
     $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
-    $("intent-refine").textContent = !message && retry ? "Retry reply" : "Send ↑";
+    const sendLabel = !message && retry ? "Retry reply" : "Send message";
+    $("intent-refine").setAttribute("aria-label", sendLabel);
+    $("intent-refine").title = sendLabel;
     $("intent-feedback").disabled = locked;
     $("intent-refresh").disabled = locked || !this.hasSource || Boolean(message);
     $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
@@ -120,10 +128,6 @@ export class IntentReview {
     if (!this.canReviewPlan) return;
     this.dialogPlan = this.planKey();
     $("plan-condition").textContent = this.draft.condition;
-    const timing = this.schedule();
-    $("plan-timing").textContent = timing
-      ? `${timing.start_delay_s ? `Start in ${timing.start_delay_s / 60} minutes` : "Start now"} · Check every ${timing.interval_s} seconds. Qualifying photos will be saved for your review.`
-      : "Set a valid start time and preview interval before confirming.";
     if (!$("plan-dialog").open) $("plan-dialog").showModal();
   }
   conversation() {
