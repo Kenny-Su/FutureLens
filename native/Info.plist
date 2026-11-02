@@ -6,10 +6,10 @@
     <key>CFBundleIdentifier</key><string>app.waitless.camera</string>
     <key>CFBundleName</key><string>WaitLess Camera</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
-    <key>NSCameraUsageDescription</key><string>WaitLess uses your selected camera to preview the scene and save photos when your agreed moment occurs.</string>
+    <key>NSCameraUsageDescription</key><string>WaitLess uses your iPhone through Continuity Camera to preview the scene and take high-quality photos when your agreed moment occurs.</string>
     <key>NSCameraUseContinuityCameraDeviceType</key><true/>
 </dict>
 </plist>

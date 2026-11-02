@@ -35,7 +35,7 @@ class SessionManager:
     """One owner of the camera. UI requests never touch an active capture session."""
 
     def __init__(self, output_root=ROOT / "outputs"):
-        self.output_root = Path(output_root)
+        self.output_root = Path(output_root).resolve()
         self.lock = threading.Lock()
         self.worker = None
         self.operation = None
@@ -50,7 +50,6 @@ class SessionManager:
         self.preview_camera = None
         self.preview_context = ExitStack()
         self.demo_video = None
-        self.cameras = None
         self.selected_camera = None
         self.source_error = None
         self.token = secrets.token_urlsafe(32)
@@ -243,26 +242,7 @@ class SessionManager:
 
     def _require_source(self):
         if self.demo_video is None and self.selected_camera is None:
-            raise ValueError("Find cameras and choose an input, or import a video first.")
-
-    def discover_cameras(self):
-        with self.lock:
-            if self.operation is not None:
-                raise ValueError("Wait for the current operation before refreshing cameras.")
-            self.source_error = None
-            self._launch("cameras", self._discover_cameras)
-
-    def _discover_cameras(self):
-        try:
-            devices = list_cameras()
-            with self.lock:
-                self.cameras = devices
-        except Exception as exc:
-            with self.lock:
-                self.source_error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
-        finally:
-            with self.lock:
-                self.operation = None
+            raise ValueError("Connect an iPhone with Continuity Camera or import a video first.")
 
     def import_video(self, path, name):
         with self.lock:
@@ -288,22 +268,57 @@ class SessionManager:
                 self.source_error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
                 self.operation = None
 
-    def use_camera(self, device_id):
+    def connect_camera(self):
         with self.lock:
             if self.operation is not None:
                 raise ValueError("Stop the current operation before changing the source.")
-            device = next((camera for camera in self.cameras or [] if camera["id"] == device_id), None)
-            if device is None:
-                raise ValueError("Refresh the camera list and choose an available input.")
-            self._close_preview()
-            self.demo_video = None
-            self.selected_camera = deepcopy(device)
             self.source_error = None
-            self.intent_generation += 1
-            self.intent = self.intent_output = None
-            self.camera_check = None
-            self.check_output = self._folder("camera-check")
-            self._launch("check", self._check)
+            self._launch("connect", self._connect_camera)
+
+    def _connect_camera(self):
+        try:
+            devices = list_cameras()
+            if not devices:
+                raise ValueError("No iPhone found. Lock your iPhone and bring it nearby or connect by USB, then try again.")
+            previous_id = (self.selected_camera or {}).get("id")
+            device = next((camera for camera in devices if camera["id"] == previous_id), devices[0])
+            self._close_preview()
+            with self.lock:
+                self.demo_video = None
+                self.selected_camera = deepcopy(device)
+                self.intent_generation += 1
+                self.intent = self.intent_output = None
+                self.camera_check = None
+                self.check_output = self._folder("camera-check")
+            self._check()
+        except Exception as exc:
+            with self.lock:
+                self.source_error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
+                self.operation = None
+
+    def disconnect_camera(self):
+        with self.lock:
+            if self.operation is not None:
+                raise ValueError("Stop monitoring or wait for the current operation before disconnecting your iPhone.")
+            if self.demo_video or self.selected_camera is None:
+                raise ValueError("No iPhone is connected.")
+            self.source_error = None
+            self._launch("disconnect", self._disconnect_camera)
+
+    def _disconnect_camera(self):
+        try:
+            self._close_preview()
+            with self.lock:
+                self.selected_camera = None
+                self.camera_check = self.check_output = None
+                self.intent_generation += 1
+                self.intent = self.intent_output = None
+        except Exception as exc:
+            with self.lock:
+                self.source_error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
+        finally:
+            with self.lock:
+                self.operation = None
 
     def check_camera(self):
         with self.lock:
@@ -357,7 +372,7 @@ class SessionManager:
                     "session_id": self.output.name if self.output else None,
                     "output": str(self.output) if self.output else None,
                     "report": self._report(), "error": self.error, "camera_check": self.camera_check,
-                    "source": self.source(), "source_error": self.source_error, "cameras": deepcopy(self.cameras),
+                    "source": self.source(), "source_error": self.source_error,
                     "intent": deepcopy(self.intent)}
 
     def media_file(self, session, name):
@@ -471,15 +486,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.manager.stop()
             elif self.path == "/api/check":
                 self.server.manager.check_camera()
-            elif self.path == "/api/cameras":
-                if data != {}:
-                    raise ValueError("Invalid camera list request.")
-                self.server.manager.discover_cameras()
             elif self.path == "/api/source":
-                if (not isinstance(data, dict) or set(data) != {"mode", "device_id"}
-                        or data["mode"] != "camera" or not isinstance(data["device_id"], str)):
-                    raise ValueError("Choose a camera input.")
-                self.server.manager.use_camera(data["device_id"])
+                if data != {"mode": "camera"}:
+                    raise ValueError("Connect your iPhone to use the camera.")
+                self.server.manager.connect_camera()
+            elif self.path == "/api/camera/disconnect":
+                if data != {}:
+                    raise ValueError("Invalid disconnect request.")
+                self.server.manager.disconnect_camera()
             elif self.path == "/api/intent/prepare":
                 self.server.manager.prepare_intent(data)
             elif self.path == "/api/intent/refine":
@@ -492,6 +506,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.server.manager.state(), 202)
         except (ValueError, UnicodeDecodeError) as exc:
             self._json({"error": str(exc)}, 400)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass
 
     def _import_video(self, length):
         if not 0 < length <= MAX_VIDEO_BYTES or self.headers.get_content_type() != "application/octet-stream":

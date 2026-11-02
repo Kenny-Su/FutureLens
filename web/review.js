@@ -48,21 +48,21 @@ export class IntentReview {
     if (!delay.validity.valid || !interval.validity.valid) return null;
     return {start_delay_s: delay.valueAsNumber * 60, interval_s: interval.valueAsNumber};
   }
-  render(state, connected = true, pending = false) {
+  render(state, connected = true, pending = false, hasSource = false) {
     this.connected = connected; this.operation = state.operation; this.pending = pending;
-    this.hasSource = Boolean(state.source.id);
+    this.hasSource = hasSource;
     const draft = state.intent && !["approved", "cancelled"].includes(state.intent.status) ? state.intent : null;
     if (draft?.id !== this.draft?.id) $("intent-feedback").value = "";
     this.draft = draft;
     const reference = draft?.preview ? draft : state.camera_check?.preview ? state.camera_check : state.intent;
     const preview = reference?.preview;
     const demo = state.source.mode === "video";
-    const refreshing = state.operation === "check" || draft?.status === "preparing";
+    const refreshing = ["check", "connect"].includes(state.operation) || draft?.status === "preparing";
     $("intent-error").textContent = !connected ? "Connection lost. Reconnecting…" : draft?.error || "";
     $("intent-image").hidden = !preview;
     $("intent-preview-empty").hidden = Boolean(preview);
-    $("intent-preview-empty").textContent = state.operation === "import" ? "Importing video…" : refreshing
-      ? demo ? "Loading video preview…" : "Connecting to camera…" : "Connect a camera or import a video.";
+    $("intent-preview-empty").textContent = state.operation === "connect" ? "Connecting iPhone…" : state.operation === "import" ? "Importing video…" : refreshing
+      ? demo ? "Loading video preview…" : "Connecting to camera…" : "Connect your iPhone or import a video.";
     if (preview && $("intent-image").getAttribute("src") !== preview) $("intent-image").src = preview;
     $("intent-reference-time").textContent = refreshing ? "Refreshing preview…" : reference?.reference_at
       ? `Reference captured ${new Date(reference.reference_at).toLocaleTimeString()}` : preview ? demo ? "Video reference · 00:00" : "Camera preview" : "";
@@ -83,7 +83,7 @@ export class IntentReview {
     $("start-delay").disabled = locked;
     $("check-interval").disabled = locked;
     $("intent-start").textContent = timing?.start_delay_s ? "Approve and schedule" : "Approve and start";
-    $("intent-start").disabled = !active || this.draft.condition_stale ||
+    $("intent-start").disabled = !active || !this.hasSource || this.draft.condition_stale ||
       Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
     $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
     $("intent-refine").textContent = !message && retry ? "Retry reply" : "Send ↑";

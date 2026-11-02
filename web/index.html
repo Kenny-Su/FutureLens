@@ -27,15 +27,14 @@
       <div class="review-grid">
         <div class="review-visual">
           <div class="source-toolbar">
-            <div class="camera-picker">
-              <label class="sr-only" for="camera-input">Camera input</label>
-              <select id="camera-input" disabled><option value="">Choose camera…</option></select>
-              <button id="find-cameras" class="button secondary" type="button" disabled>Find cameras</button>
-              <button id="source-camera" class="button secondary" type="button" disabled>Connect</button>
+            <div class="source-actions">
+              <button id="source-camera" class="button secondary" type="button" disabled>Connect iPhone</button>
+              <button id="source-video" class="text-button" type="button" disabled>Import video</button>
+              <input id="demo-file" type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.avi" hidden>
             </div>
-            <div class="source-actions"><button id="source-video" class="text-button" type="button" disabled>Import video</button><input id="demo-file" type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.avi" hidden><span id="source-detail" class="muted small"></span></div>
+            <span id="source-detail" class="muted small"></span>
           </div>
-          <div id="intent-image-wrap" class="image-surface"><div id="intent-preview-empty" class="preview-placeholder" role="status">Connect a camera or import a video.</div><img id="intent-image" alt="Reference preview for discussing your photograph" hidden><svg id="intent-overlay" class="intent-overlay" role="img" aria-label="AI highlights" hidden></svg></div>
+          <div id="intent-image-wrap" class="image-surface"><div id="intent-preview-empty" class="preview-placeholder" role="status">Connect your iPhone or import a video.</div><img id="intent-image" alt="Reference preview for discussing your photograph" hidden><svg id="intent-overlay" class="intent-overlay" role="img" aria-label="AI highlights" hidden></svg></div>
           <div class="review-image-toolbar"><span id="intent-reference-time" class="muted small"></span><button id="intent-refresh" class="text-button" type="button" disabled>Refresh preview</button></div>
           <div class="schedule-controls" role="group" aria-label="Monitoring timing">
             <label for="start-delay">Start after <span class="schedule-input"><input id="start-delay" type="number" min="0" max="1440" step="1" value="0" required><span>minutes</span></span></label>
@@ -43,7 +42,7 @@
           </div>
         </div>
         <section class="review-conversation" aria-labelledby="conversation-title">
-          <div class="conversation-heading"><h2 id="conversation-title">Conversation</h2><span class="muted small">No capture during review</span></div>
+          <div class="conversation-heading"><h2 id="conversation-title">Conversation</h2><span class="muted small">Monitoring starts after approval</span></div>
           <div id="review-messages" class="review-messages" role="log" aria-label="Intent review conversation" aria-live="polite" aria-relevant="additions" tabindex="0"><article class="review-message assistant"><span class="message-author">WaitLess</span><p class="message-text">What moment should I wait for?</p></article></div>
           <p id="review-thinking" class="review-thinking muted small" role="status" hidden>Thinking…</p>
           <form id="review-composer" class="review-composer">

@@ -28,9 +28,9 @@ through photographs taken while nothing was happening.
    or repeated moments, review the session's previews and captures, and stop
    whenever you're done.
 
-Choose your Mac's built-in camera, an external webcam, or your iPhone through
-Continuity Camera. WaitLess saves still images from the selected camera's video
-stream when the moment arrives.
+Use your iPhone through Continuity Camera on your Mac. WaitLess watches previews
+and requests high-quality still photos with Apple's photo processing when your
+moment arrives. Keep your iPhone connected and your Mac awake while it watches.
 
 Some moments you might delegate:
 

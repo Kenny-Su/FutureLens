@@ -123,6 +123,8 @@ class Monitor:
                     entry.update(capture_status="downloaded", saved_files=[str(p.relative_to(self.output)) for p in files])
                     if isinstance(self.camera, VideoCamera):
                         entry["video_capture_position_s"] = self.camera.last_capture_position
+                    elif isinstance(self.camera, MacCamera):
+                        entry["capture_image"] = self.camera.last_capture_info
                     self.report["photos_taken"] += 1
                     self.last_capture = time.monotonic()
                     self.archive.record_capture(entry["capture_id"], preview, files)
@@ -405,11 +407,10 @@ class Monitor:
 
     def run(self, camera_id, video=None):
         source = (VideoCamera(video, self.output / "moments", enable_capture=True) if video else
-                  MacCamera(self.output / "moments", enable_capture=True, device_id=camera_id))
+                  MacCamera(self.output / "moments", device_id=camera_id, enable_capture=True, stop_event=self.stop_event))
         with source as self.camera:
             self.report.update(camera_model=self.camera.model,
-                               source=f"video:{video.name}" if video else f"macos:{self.camera.model}",
-                               camera_id=camera_id if not video else None,
+                               source=f"video:{video.name}" if video else f"continuity:{self.camera.model}",
                                camera_capabilities=self.camera.capabilities,
                                monitoring_started_at=datetime.now(timezone.utc).isoformat())
             self.publish()
@@ -484,7 +485,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     source = approved_intent.data.get("source", {})
     if (source.get("mode") != ("video" if video else "camera")
             or source.get("id") != (video.metadata()["id"] if video else camera_id)
-            or (not video and not camera_id)):
+            or (not video and (not camera_id or source.get("kind") != "iphone"))):
         raise ValueError("Review the selected camera or video before monitoring.")
     config = load_config()
     validate_config(config)
@@ -495,7 +496,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     write_json(output / "intent.json", approved_intent.data)
     report = {
         "status": "running", "phase": "scheduled" if settings.start_delay_s else "connecting",
-        "scheduled_start_at": scheduled_start_at, "mode": "demo_video" if video else "macos_camera",
+        "scheduled_start_at": scheduled_start_at, "mode": "demo_video" if video else "continuity_camera",
         "provider": "anthropic", "model": MODEL,
         "intent": approved_intent.data,
         "model_settings": {"effort": EFFORT, "thinking": THINKING["type"],
@@ -503,7 +504,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
                            "automatic_prompt_caching": True},
         "api_host": urlsplit(API_ENDPOINT).hostname,
         "instructions": MONITORING_SYSTEM_PROMPT, "request": settings.request,
-        "source": f"video:{video.name}" if video else "macos:camera", "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": f"video:{video.name}" if video else "continuity:iphone", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
                      ("cooldown", "max_frame_age", "interval_s", "start_delay_s")},
         "current_interval_s": settings.interval_s,
@@ -520,6 +521,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     if video:
         report["video"] = video.metadata()
     write_json(output / "results.json", report)
+    monitor = None
     try:
         check_stop(stop_event)
         while time.monotonic() < start_deadline:
@@ -532,9 +534,13 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
         report["phase"] = "connecting"
         write_json(output / "results.json", report)
         check_stop(stop_event)
-        return Monitor(settings, config, output, report, stop_event).run(camera_id, video)
+        monitor = Monitor(settings, config, output, report, stop_event)
+        return monitor.run(camera_id, video)
     except SessionStopped:
-        report.update(status="stopped", stop_reason="user_stop")
+        failure = getattr(getattr(monitor, "camera", None), "failure", None)
+        report.update(status="stopped", stop_reason="camera_disconnected" if failure else "user_stop")
+        if failure:
+            report["camera_error"] = failure
         return output
     except KeyboardInterrupt:
         report["status"] = "interrupted"
@@ -543,7 +549,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     except Exception as exc:
         report.update(status="failed", error_type=type(exc).__name__)
         if isinstance(exc, CameraError):
-            report.update(camera_model=exc.model, source=f"macos:{exc.model}",
+            report.update(camera_model=exc.model, source=f"continuity:{exc.model}",
                           camera_capabilities=exc.capabilities, camera_error=str(exc))
         if isinstance(exc, ApiError):
             report["api_error"] = exc.details
