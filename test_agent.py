@@ -9,19 +9,19 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from agent import SessionAgent
+from agent import MonitoringAgent
 from camera import CameraFrame
 from history import PreviewArchive, local_message
 from model import image_content, text_content
 from test_model import compacted, tool
 
 
-class SessionAgentTests(unittest.TestCase):
+class MonitoringAgentTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.agent = SessionAgent(self.root)
+        self.agent = MonitoringAgent(self.root)
         self.archive = PreviewArchive(self.root, 100)
 
     def observe(self, frame_id):
@@ -29,12 +29,12 @@ class SessionAgentTests(unittest.TestCase):
         self.agent.append({"role": "user", "content": [text_content(preview.metadata()),
                            image_content(preview.image())]}, frame_id, [preview])
         sent = deepcopy(self.agent.messages)
-        reply = tool("set_preview_interval", {"seconds": 60}, f"schedule-{frame_id}")
+        reply = tool("shoot", call_id=f"capture-{frame_id}")
         reply["content"] = [{"type": "thinking", "thinking": "", "signature": f"thinking-{frame_id}"},
                             {"type": "redacted_thinking", "data": f"opaque-{frame_id}"}, *reply["content"]]
         self.agent.accept_response(reply, frame_id, 100_000)
-        self.agent.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"schedule-{frame_id}",
-                          "content": [text_content({"seconds": 60})]}]}, frame_id)
+        self.agent.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"capture-{frame_id}",
+                          "content": [text_content({"capture_status": "downloaded"})]}]}, frame_id)
         return sent
 
     def test_recent_four_observations_and_thinking_survive_repeated_compaction(self):
@@ -63,7 +63,7 @@ class SessionAgentTests(unittest.TestCase):
         self.assertEqual(self.agent.revision, 2)
         self.assertEqual(self.archive.get_history(5, {"frame_ids": [0]})[0].image().size, (32, 24))
         with self.assertRaises(ValueError):
-            self.agent.accept_response(tool("shoot", call_id="schedule-0"), 5, 1000)
+            self.agent.accept_response(tool("shoot", call_id="capture-0"), 5, 1000)
 
     def test_failed_summary_does_not_change_history_or_allow_immediate_retry(self):
         for i in range(5):

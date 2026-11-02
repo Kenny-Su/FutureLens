@@ -13,13 +13,14 @@ def object_schema(properties):
             "additionalProperties": False}
 
 
-BOX_SCHEMA = {"type": "array", "items": {"type": "number"}}
+BOX_SCHEMA = {"type": "array", "items": {"type": "number"},
+              "description": "[x1,y1,x2,y2] absolute pixel coordinates within image_width and image_height."}
 TARGET_SCHEMA = object_schema({
     "id": {"type": "string"}, "label": {"type": "string"}, "box": BOX_SCHEMA,
 })
 REVIEW_SCHEMA = object_schema({
     "condition": {"type": "string"}, "reply": {"type": "string"},
-    "question": {"type": "string"},
+    "question": {"type": "string", "description": "Clarification question, or an empty string when none is needed."},
     "targets": {"type": "array", "items": TARGET_SCHEMA},
 })
 SNAPSHOT_SCHEMA = object_schema({

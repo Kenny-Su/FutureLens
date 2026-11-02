@@ -11,14 +11,13 @@ from urllib.parse import urlsplit
 
 from camera import SonyCamera, CameraError, DEFAULT_HELPER
 from demo import VideoCamera, VideoEnded
-from agent import (SessionAgent, COMPACT_INPUT_TOKENS, COMPACT_REQUEST_BYTES, COMPACT_IMAGES,
+from agent import (MonitoringAgent, COMPACT_INPUT_TOKENS, COMPACT_REQUEST_BYTES, COMPACT_IMAGES,
                    KEEP_OBSERVATIONS, COMPACTION_RETRY_SECONDS)
 from history import Preview, PreviewArchive, AgentJournal, capture_outcome, append_json
 from intent import ApprovedIntent, json_response, validate_snapshot, validate_wait_reason
-from model import (API_ENDPOINT, INSTRUCTIONS, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES, MAX_INPUT_TOKENS,
+from model import (API_ENDPOINT, MONITORING_SYSTEM_PROMPT, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES, MAX_INPUT_TOKENS,
                    ApiError, CapacityReached, call_model, check_capacity, count_tokens, image_content,
                    load_config, parse_compaction, response_usage, text_content, validate_config, MAX_CALLS_PER_OBSERVATION,
-                   AUTO_MIN_INTERVAL, AUTO_MAX_INTERVAL, AUTO_INITIAL_INTERVAL,
                    EFFORT, THINKING, MAX_OUTPUT_TOKENS, model_image)
 
 
@@ -27,10 +26,16 @@ class SessionSettings:
     request: str
     max_frame_age: float = 30
     cooldown: float = 5
+    interval_s: int = 60
+    start_delay_s: int = 0
 
     def __post_init__(self):
         if not isinstance(self.request, str) or not self.request.strip() or len(self.request) > 8000:
             raise ValueError("Enter an instruction (up to 8,000 characters).")
+        for name, minimum in (("interval_s", 1), ("start_delay_s", 0)):
+            value = getattr(self, name)
+            if type(value) is not int or not minimum <= value <= 86400:
+                raise ValueError(f"{name} must be whole seconds from {minimum} to 86400.")
         for name in ("max_frame_age", "cooldown"):
             value = getattr(self, name)
             try:
@@ -63,7 +68,7 @@ class Monitor:
         self.report, self.stop_event = report, stop_event
         self.last_capture = -math.inf
         self.latest_capture_outcome = self.last_downloaded_capture = None
-        self.agent = SessionAgent(output)
+        self.agent = MonitoringAgent(output)
         self.intent = report["intent"]
         self.reference = Preview(-1, 0, 0, -1, output / "intent-reference.jpg",
                                  self.intent["width"], self.intent["height"])
@@ -145,14 +150,12 @@ class Monitor:
         active = None
         outcome = "error"
         decision_corrections = 0
-        journal.message({"role": "system", "content": [{"type": "text", "text": INSTRUCTIONS}]})
+        journal.message({"role": "system", "content": [{"type": "text", "text": MONITORING_SYSTEM_PROMPT}]})
         initial = {"user_request": self.settings.request, "preview": preview.metadata(),
                    "session": self.current_state(preview, 0),
                    "history": {"count": preview.id, "first_frame_id": 0 if preview.id else None,
                                "latest_frame_id": preview.id - 1 if preview.id else None},
-                   "sampling": {"current_interval_s": self.report["current_interval_s"],
-                                "min_interval_s": AUTO_MIN_INTERVAL,
-                                "max_interval_s": AUTO_MAX_INTERVAL},
+                   "sampling": {"interval_s": self.settings.interval_s},
                    "latest_capture_outcome": self.latest_capture_outcome,
                    "last_downloaded_capture": self.last_downloaded_capture}
         current_image = model_image(preview.image())
@@ -206,7 +209,7 @@ class Monitor:
                 journal.message(message)
                 journal.event("model", "completed", action_id, turn=turn, latency_s=time.monotonic() - before)
                 active = None
-                if call is None or call["name"] in ("shoot", "set_preview_interval"):
+                if call is None or call["name"] == "shoot":
                     try:
                         if call is None:
                             end = json_response(response)
@@ -224,11 +227,11 @@ class Monitor:
                                 "is_error": True, "content": [text_content({"error": str(exc), "executed": False})]}]}, journal)
                         outcome = "invalid_assessment"
                         break
-                    if call is None or call["name"] == "set_preview_interval":
+                    if call is None:
                         try:
                             state = self.current_state(preview, entry["model_calls"])
                             wait_reason = validate_wait_reason(
-                                (end if call is None else call["input"]).get("wait_reason"), assessment["condition"],
+                                end.get("wait_reason"), assessment["condition"],
                                 photos_taken=state["photos_taken"], cooldown_remaining_s=state["cooldown_remaining_s"])
                         except ValueError as exc:
                             entry.update(assessment=None, assessment_status="pending", decision_error=str(exc))
@@ -241,12 +244,7 @@ class Monitor:
                                     "and a requested photo is still due, call shoot. Otherwise return a consistent "
                                     "snapshot and wait_reason. Respect the approved quantity, repetition and timing; "
                                     "do not repeat an already fulfilled one-photo request."})]
-                            if call:
-                                feedback = [{"type": "tool_result", "tool_use_id": call["id"],
-                                             "is_error": True, "content": feedback}]
-                                journal.event("tool", "failed", "tool:" + call["id"], name=call["name"], error=str(exc))
-                            else:
-                                journal.event("model", "completed", action_id, turn=turn, decision_error=str(exc))
+                            journal.event("model", "completed", action_id, turn=turn, decision_error=str(exc))
                             self.append_message({"role": "user", "content": feedback}, journal)
                             outcome = self.expired(preview) or "invalid_decision"
                             if decision_corrections or outcome != "invalid_decision" or turn == MAX_CALLS_PER_OBSERVATION:
@@ -265,8 +263,7 @@ class Monitor:
                 name, arguments, call_id = call["name"], call["input"], call["id"]
                 active = ("tool", "tool:" + call_id)
                 journal.event("tool", "started", "tool:" + call_id, name=name, arguments=arguments)
-                self.report["phase"] = ("capturing" if name == "shoot" else
-                                        "scheduling" if name == "set_preview_interval" else "retrieving")
+                self.report["phase"] = "capturing" if name == "shoot" else "retrieving"
                 self.publish()
                 images, is_error, summary = [], False, {}
                 if name == "shoot":
@@ -286,24 +283,7 @@ class Monitor:
                     summary = {"error": outcome}
                 else:
                     try:
-                        if name == "set_preview_interval":
-                            seconds = arguments.get("seconds")
-                            if (set(arguments) != {"seconds", "snapshot", "wait_reason"} or type(seconds) is not int
-                                    or not AUTO_MIN_INTERVAL <= seconds <= AUTO_MAX_INTERVAL):
-                                raise ValueError(f"Use only integer seconds from {AUTO_MIN_INTERVAL} to {AUTO_MAX_INTERVAL}.")
-                            result = {"previous_seconds": self.report["current_interval_s"],
-                                      "seconds": seconds, "from_frame_id": preview.id}
-                            if seconds == self.report["current_interval_s"]:
-                                result.update(changed=False, message=(
-                                    f"Interval unchanged at {seconds} seconds. "
-                                    "Observation ended; monitoring continues automatically. "
-                                    "Return a wait snapshot when no change or photograph is needed."))
-                            else:
-                                entry["next_preview_interval_s"] = seconds
-                                self.report.update(current_interval_s=seconds, last_interval_change=result)
-                            content = [text_content(result)]
-                            summary = {key: value for key, value in result.items() if key != "message"}
-                        elif name == "list_history":
+                        if name == "list_history":
                             result = self.archive.list_history(preview.id, arguments)
                             content = [text_content(result)]
                             summary = {"count": len(result["previews"]), "next_cursor": result["next_cursor"]}
@@ -317,24 +297,17 @@ class Monitor:
                         is_error = True
                         content = [text_content({"error": str(exc)})]
                         summary = {"error": str(exc)}
-                if name != "shoot" and not (name == "set_preview_interval" and not is_error):
+                if name != "shoot":
                     content.append(text_content({"current_preview_id": preview.id,
                         "session": self.current_state(preview, entry["model_calls"])}))
                 message = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id,
                                                           "content": content, "is_error": is_error}]}
                 self.append_message(message, journal, images)
-                unchanged_interval = name == "set_preview_interval" and summary.get("changed") is False
-                journal.event("tool", "failed" if is_error else "skipped" if unchanged_interval else "completed",
+                journal.event("tool", "failed" if is_error else "completed",
                               "tool:" + call_id, name=name, **summary)
-                if is_error and name == "set_preview_interval":
-                    entry.update(assessment=None, assessment_status="pending")
-                    entry.pop("wait_reason", None)
                 active = None
                 if name == "shoot":
                     outcome = entry["capture_status"]
-                    break
-                if name == "set_preview_interval" and not is_error:
-                    outcome = "preview_interval_unchanged" if unchanged_interval else "preview_interval_set"
                     break
                 outcome = self.expired(preview)
                 if outcome:
@@ -360,8 +333,7 @@ class Monitor:
             if active:
                 journal.event(active[0], "skipped", active[1], reason=outcome)
             if entry["run_status"] != "failed":
-                entry["run_status"] = "finished" if outcome in (
-                    "no_photo", "downloaded", "preview_interval_set", "preview_interval_unchanged") else "skipped"
+                entry["run_status"] = "finished" if outcome in ("no_photo", "downloaded") else "skipped"
             entry.update(outcome=outcome, frame_age_s=time.monotonic() - preview.received_at)
             self.archive.record_outcome(entry)
             if entry["capture_status"] != "not_requested":
@@ -468,7 +440,7 @@ class Monitor:
                     break
                 entry = {**preview.metadata(), "preview_file": str(preview.path.relative_to(self.output)),
                          "model_calls": 0, "run_status": "saved", "capture_status": "not_requested",
-                         "next_preview_interval_s": self.report["current_interval_s"]}
+                         "next_preview_interval_s": self.settings.interval_s}
                 if video:
                     entry["video_position_s"] = self.camera.last_frame_position
                 self.report["observations"].append(entry)
@@ -493,7 +465,7 @@ class Monitor:
                     self.report.update(status="capacity_reached", stop_reason="capacity_reached", capacity=exc.details)
                     break
                 check_stop(self.stop_event)
-                next_sample = max(time.monotonic(), preview.received_at + entry["next_preview_interval_s"])
+                next_sample = max(time.monotonic(), preview.received_at + self.settings.interval_s)
                 if video:
                     next_sample = min(next_sample, self.camera.started + video.duration)
                 self.report.update(phase="waiting", next_observation_at=time.time() + max(0, next_sample - time.monotonic()))
@@ -504,6 +476,8 @@ class Monitor:
 
 def run_session(settings: SessionSettings, output: Path, *, approved_intent: ApprovedIntent,
                 camera_helper=DEFAULT_HELPER, stop_event=None, video=None) -> Path:
+    start_deadline = time.monotonic() + settings.start_delay_s
+    scheduled_start_at = time.time() + settings.start_delay_s
     if not isinstance(approved_intent, ApprovedIntent) or approved_intent.data["request"] != settings.request:
         raise ValueError("A matching approved intent is required before monitoring.")
     config = load_config()
@@ -514,20 +488,19 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     shutil.copyfile(approved_intent.reference_path, output / "intent-reference.jpg")
     write_json(output / "intent.json", approved_intent.data)
     report = {
-        "status": "running", "phase": "connecting", "mode": "demo_video" if video else "sony_usb",
+        "status": "running", "phase": "scheduled" if settings.start_delay_s else "connecting",
+        "scheduled_start_at": scheduled_start_at, "mode": "demo_video" if video else "sony_usb",
         "provider": "anthropic", "model": MODEL,
         "intent": approved_intent.data,
         "model_settings": {"effort": EFFORT, "thinking": THINKING["type"],
                            "thinking_display": THINKING["display"], "max_output_tokens": MAX_OUTPUT_TOKENS,
                            "automatic_prompt_caching": True},
         "api_host": urlsplit(API_ENDPOINT).hostname,
-        "instructions": INSTRUCTIONS, "request": settings.request,
+        "instructions": MONITORING_SYSTEM_PROMPT, "request": settings.request,
         "source": f"video:{video.name}" if video else "sony:usb", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
-                     ("cooldown", "max_frame_age")},
-        "auto_interval_bounds_s": {"min": AUTO_MIN_INTERVAL, "max": AUTO_MAX_INTERVAL, "initial": AUTO_INITIAL_INTERVAL},
-        "current_interval_s": AUTO_INITIAL_INTERVAL,
-        "last_interval_change": None,
+                     ("cooldown", "max_frame_age", "interval_s", "start_delay_s")},
+        "current_interval_s": settings.interval_s,
         "capacity_limits": {"images": MAX_IMAGES, "request_bytes": MAX_REQUEST_BYTES, "input_tokens": MAX_INPUT_TOKENS},
         "calls_per_observation": MAX_CALLS_PER_OBSERVATION,
         "observations": [], "previews_saved": 0, "photos_taken": 0,
@@ -542,6 +515,16 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
         report["video"] = video.metadata()
     write_json(output / "results.json", report)
     try:
+        check_stop(stop_event)
+        while time.monotonic() < start_deadline:
+            delay = start_deadline - time.monotonic()
+            if stop_event is None:
+                time.sleep(max(0, delay))
+            else:
+                stop_event.wait(max(0, delay))
+            check_stop(stop_event)
+        report["phase"] = "connecting"
+        write_json(output / "results.json", report)
         check_stop(stop_event)
         return Monitor(settings, config, output, report, stop_event).run(camera_helper, video)
     except SessionStopped:

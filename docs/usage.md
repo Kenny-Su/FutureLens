@@ -8,16 +8,24 @@ Run the commands from the repository root. WaitLess runs on macOS 14.1 or later
 one Sony camera over USB through its local browser interface.
 
 Anthropic is the only supported API provider. WaitLess uses its Messages API with
-**Claude Haiku 5.5** (`claude-haiku-5-5`). Each session has one persistent agent
-conversation. Every observation adds a new preview, freshness and cooldown state, history availability,
+**Claude Haiku 5.5** (`claude-haiku-5-5`) in two separate modes:
+
+- **Alignment** discusses the shutter condition with the photographer and can illustrate
+  its understanding with highlights. It has its own conversation and no capture tools.
+- **Monitoring** starts a fresh conversation with the approved condition and reference
+  image. It evaluates sampled previews and can retrieve history or request a photograph.
+  The alignment discussion is not carried into monitoring.
+
+Each mode has a short system prompt and its own response schema in `model.py`;
+they share the model configuration and API transport. Each monitoring session has
+one persistent conversation. Every observation adds a new preview, freshness and cooldown state, history availability,
 and latest factual capture outcome. Claude can list history, retrieve earlier images,
-request a photograph, or change the automatic preview interval. An ordinary end
+or request a photograph. The photographer sets the start delay and observation interval. An ordinary end
 of turn finishes the observation without shooting and keeps the current interval.
 When no action is needed, Claude returns a structured **wait** response with a current
-capture-condition assessment and a waiting reason, without a tool call; the host schedules the next preview automatically. Repeating the current interval
-is recorded as unchanged, preserves the last actual interval change, and ends the
-observation without another inference. A met condition requires a `shoot` call when
-a requested photo is still due. Waiting or changing the interval must identify an
+capture-condition assessment and a waiting reason, without a tool call; the host
+schedules the next preview at the fixed interval. A met condition requires a `shoot` call when
+a requested photo is still due. Waiting must identify an
 unmet/uncertain condition, an already photographed occurrence or quantity, or an active
 capture cooldown. The server checks that reason against the assessment and session
 facts. An inconsistent decision gets one correction opportunity on the same frame,
@@ -132,8 +140,11 @@ are controlled in the browser.
 1. The **Align on the moment** page shows a camera preview on the left and a
    conversation on the right. Reply to **What moment should I wait for?** with your
    instruction; the same conversation continues through review and approval.
-   **Preview timing** is automatic:
-   Claude chooses intervals between **10 seconds and 5 minutes**.
+   The preview, conversation, timing controls, and approval button stay in place
+   throughout. Approval becomes available once the shutter condition is settled.
+   Set **Start after** (minutes) and **Check every** (seconds) before approval.
+   For example, use **20** and **10** to begin in 20 minutes and check every 10 seconds.
+   A start delay of **0** begins immediately. The initial check interval is **60 seconds**.
    There are no session duration, photograph-count, or AI-call budgets. Describe
    whether to capture once or repeat photographs when the condition occurs again.
    Monitoring continues until you press **Stop session**. The header shows elapsed
@@ -168,7 +179,10 @@ are controlled in the browser.
    monitoring takes ownership, on a preview error, when changing sources, or when the server exits.
    **Start over** clears the current discussion so you can describe a different moment.
    **Approve and start** commits the displayed interpretation and begins monitoring
-   from a fresh frame. Approval is mandatory for every session. The boxes align the
+   from a fresh frame. With a delay, **Approve and schedule** starts a countdown first;
+   no monitoring preview, model call, or capture runs during this countdown.
+   You can stop a scheduled session at any time. The timing controls remember your
+   choices in this browser; the server preserves an approved schedule across page refreshes. Approval is mandatory for every session. The boxes align the
    photographer and agent on the intended subjects and condition before monitoring;
    monitoring evaluates the condition without producing target locations or visibility lists.
 4. Monitoring opens a vertical **Session activity** stream. Previews,
@@ -176,9 +190,8 @@ are controlled in the browser.
    order. Timestamps are relative to the start of the session. Progress updates
    revise the same action instead of creating duplicate entries; a no-photo decision
    reads **Keep watching**. The stream shows sampled observations, not continuous video
-   or internal model reasoning. Interval changes such as **300 → 10 sec**
-   appear as independent actions, and the header shows the current interval.
-   A repeated setting appears as **Preview interval unchanged**, not as a change.
+   or internal model reasoning. The header shows your fixed interval and a countdown
+   to the next check. Change timing by stopping and starting another reviewed session.
 5. Open any thumbnail in the image viewer. History retrieval actions include their
    returned thumbnails and links back to the original previews. Scrolling upward
    preserves your position while monitoring continues. **Return to latest** resumes
@@ -218,13 +231,13 @@ decoded locally. Demo mode does not open the Sony camera or require its runtime.
 The Anthropic API is still used for review and observations, using sampled images.
 
 The reference is the video's first frame and stays still throughout alignment.
-After **Approve and start**, playback begins at the start and advances at normal
-speed, including while the model is evaluating a preview. A shutter request saves
+After approval and any start delay, playback begins at the start and advances at
+normal speed, including while the model is evaluating a preview. A shutter request saves
 the video frame at that time as a full-resolution JPEG under the session's
 `moments/` folder. The report records video positions for previews and captures.
 
-Sampling follows the same automatic timing as the camera: 60 seconds initially,
-adjustable by the agent between 10 and 300 seconds. Use a long enough clip for the
+Sampling follows the same fixed timing controls as the camera, including delayed
+start. Choose an interval suited to the clip (for example, 10 seconds). Use a long enough clip for the
 moments you want to test; brief events between sampled previews can be missed.
 The session finishes when the video ends, or when you stop it. A reply arriving
 after the end cannot save another frame. **New session** starts the video over.
@@ -236,46 +249,33 @@ local artifacts; only their still previews and captured JPEGs are served by the 
 
 ## The observation loop
 
-The first observation happens immediately after camera setup. Preview timing is
-always automatic; there is no mode selector or manual interval setting.
+The photographer chooses a fixed interval of **1–86,400 seconds** and a start delay
+of **0–1,440 minutes** before approval. The default is immediate start with a
+60-second interval. The start delay is measured from approval; camera connection
+and the first fresh preview begin when the delay expires. The preview-only review
+connection is released while waiting. Keep the server running and the computer awake.
+A server restart does not restore scheduled sessions.
 
-1. Retrieve a fresh camera preview and save it locally.
+1. After the start delay, connect to the source, retrieve a fresh preview, and save it locally.
 2. Append to the session's conversation with the instruction, timestamped preview,
-   freshness and cooldown state, available history, latest capture facts,
-   interval bounds, and the current interval.
+   freshness and cooldown state, available history, latest capture facts, and the fixed interval.
 3. Check capacity, then call Claude. A response may contain one tool call or end
    the observation without a photograph.
 4. Return history tool results to Claude and continue within the same run. A `shoot`
-   call uses the capture safeguards, records its actual outcome, and automatically
-   finishes the observation, with no extra inference afterward. A
-   successful `set_preview_interval` call also finishes the observation without
-   another inference or a photograph.
+   call uses the capture safeguards, records its actual outcome, and finishes the
+   observation, with no extra inference afterward.
 5. Compact older context if needed, then wait for the next scheduled observation.
-   The next preview continues the same conversation, including the previous
-   observation's final capture or interval-change result.
+   The next preview continues the same conversation, including the previous capture result.
 
-**Auto mode:** each new session starts at **60 seconds**. Claude calls
-`set_preview_interval` only when a different interval is needed, within
-the **10 to 300 second** bounds. Alongside `seconds`, it supplies the current snapshot
-and a reason no photograph is due. The guidance is to wait longer when history shows a
-stable scene far from the target, and check sooner as the desired moment approaches.
-Claude can compare images already in context or retrieve missing images to assess change. The current interval is
-included in every observation's context and persists until a valid tool call
-changes it. Plain end turns, photographs, rejected changes, expired previews, and
-run limits all keep the current interval. A successful change takes effect for the
-next preview and ends the observation without another inference. Starting a new
-session resets Auto to 60 seconds.
-
-Auto's interval is measured from the current preview's host timestamp, including
+The interval is measured from the current preview's host timestamp, including
 retrieval and processing time. If processing outlasts that interval, the next
 preview is taken as soon as the current observation finishes. Observations never
-overlap and missed previews are not replayed. The countdown reflects the next
-scheduled observation.
+overlap and missed previews are not replayed. The model cannot change the interval.
+The countdown reflects the next scheduled observation.
 
 Everything runs sequentially: there is one evaluation or compaction in flight and no background
 preview sampler or scene-change detector. During a long wait, a new event cannot
-be detected until the next preview. Auto can reduce checks during quiet periods,
-but may miss a brief clearing between them. Field performance and net resource
+be detected until the next preview. A brief clearing between checks may be missed. Field performance and net resource
 savings remain unmeasured. Every sampled preview is retained; the program does not
 save every frame from the camera's live stream.
 
@@ -306,7 +306,6 @@ shutter command, or changes to capture settings. The check saves a local preview
 | `list_history` | Optional `start_s`, `end_s`, `cursor`, `limit` | Earlier previews, newest first: IDs, timestamps, capture facts, and `next_cursor`. Defaults to 20, maximum 50. Time filters are inclusive seconds since monitoring began. |
 | `get_history` | `frame_ids`: one to eight distinct earlier IDs | Actual images, timestamps, and factual capture outcomes. |
 | `shoot` | Current observation `snapshot` | Downloaded, skipped, or failed capture outcome; always finishes the observation. |
-| `set_preview_interval` | Integer `seconds` (10–300), current observation `snapshot`, and `wait_reason` | Changes the persistent preview interval and finishes the observation without a photograph or another inference. The interval stays in effect until changed. Invalid arguments return a tool error the model can correct within its remaining calls. |
 
 An observation `snapshot` contains only `frame_id`, `intent_revision`, and `condition`
 (`met`, `unmet`, or `uncertain`). It has no target list or coordinates.
@@ -320,12 +319,12 @@ in subsequent observations as factual context. Follow-up evaluations receive fre
 freshness, cooldown, and remaining calls for that observation inside the preceding tool result.
 Tool IDs are deduplicated across the entire session, including across compaction.
 
-Interval changes are also saved in each run's transcript and activity trace.
-`results.json` records `current_interval_s` and the latest
-`last_interval_change` (previous seconds, new seconds, and triggering frame ID);
-each observation includes `next_preview_interval_s`. Refreshing the interface restores these
-values from the running server's report. Stop and preview freshness still take
-precedence over scheduling decisions.
+`results.json` records the approved `settings.interval_s`, `settings.start_delay_s`,
+and `scheduled_start_at` (Unix seconds). Its `current_interval_s` and each observation's
+`next_preview_interval_s` stay fixed. During the delay, phase is `scheduled` and the
+session retains exclusive ownership. Refreshing the browser restores the countdown
+from the server; it does not restart the delay. Historical reports with interval-change
+events remain readable.
 The review endpoint `/api/intent/prepare` accepts `request` for a new review, or
 `intent_id` and `revision` to refresh the reference while retaining the discussion.
 `/api/intent/refine` accepts the identity/revision and text in `feedback`. An empty
@@ -339,8 +338,9 @@ condition must faithfully restate the shutter rule explained there.
 Pending or failed replies set `condition_stale` and cannot be approved. Manual
 geometry/condition editing and the former `/api/intent/update` endpoint are removed.
 `/api/intent/cancel` accepts the identity/revision. `/api/state` includes the current
-revisioned draft. `/api/start` accepts only `intent_id` and `revision`, requires a ready
-review with a current condition, no unanswered question, and no pending reply,
+revisioned draft. `/api/start` accepts `intent_id`, `revision`, and optional integer
+`interval_s` (default 60) and `start_delay_s` (default 0), each capped at 86,400 seconds.
+The interval must be positive and the delay non-negative. It requires a ready review with a current condition, no unanswered question, and no pending reply,
 and commits an immutable approved snapshot. Direct instruction-only starts,
 stale revisions, and reused approvals are rejected. Drafts survive browser refreshes;
 a server restart requires a new review. Former settings such as
@@ -565,8 +565,8 @@ Our native bridge uses Sony's SDK headers and libraries directly. It provides th
 persistent internal process protocol, USB selection, capability checks, and capture
 safeguards. Claude decisions, timing, and capture checks remain in Python.
 
-- `model.py`: fixed Anthropic transport, native tool payloads, strict turn validation, and capacity checks.
-- `agent.py`: session conversation, thinking preservation, signed compaction boundaries, and append-only context log.
+- `model.py`: alignment and monitoring prompts and payloads, shared Anthropic transport, turn validation, and capacity checks.
+- `agent.py`: monitoring conversation, thinking preservation, signed compaction boundaries, and append-only context log.
 - `history.py`: session-scoped history tools, per-run journals, and capture records.
 - `waitless.py`: validated session settings, monitoring, capture policy, and result recording.
 - `ui.py` / `web/`: local camera interface, session controls, and preview timeline.

@@ -344,8 +344,9 @@ function renderMonitor() {
   const active = state.operation === "monitor";
   const failed = Boolean(sessionError(state));
   const stopping = state.stopping;
-  text("monitor-title", active ? demo ? "Demo monitoring" : "Monitoring" : failed ? "Session ended" : report.status === "stopped" ? "Session stopped" : "Session complete");
-  text("status-text", !connected ? "Reconnecting" : stopping ? "Stopping safely" : failed ? "Needs attention" : active ? (report.phase === "connecting" || !report.phase ? "Connecting" : "Monitoring") : report.status === "stopped" ? "Stopped" : "Finished");
+  const scheduled = active && report.phase === "scheduled";
+  text("monitor-title", scheduled ? "Monitoring scheduled" : active ? demo ? "Demo monitoring" : "Monitoring" : failed ? "Session ended" : report.status === "stopped" ? "Session stopped" : "Session complete");
+  text("status-text", !connected ? "Reconnecting" : stopping ? "Stopping safely" : failed ? "Needs attention" : scheduled ? "Scheduled" : active ? (report.phase === "connecting" || !report.phase ? "Connecting" : "Monitoring") : report.status === "stopped" ? "Stopped" : "Finished");
   $("session-status").className = `status-pill ${failed ? "error" : active ? "busy" : ""}`;
   show("stop", active);
   $("stop").disabled = stopping || pending || !connected;
@@ -353,7 +354,7 @@ function renderMonitor() {
   text("active-instruction", report.intent?.condition ||
     (state.intent?.status === "approved" ? state.intent.condition : "") || report.request || state.intent?.request || "");
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
-  text("active-camera", report.camera_model || (active ? demo ? "Opening video…" : "Connecting…" : "Not connected"));
+  text("active-camera", report.camera_model || (scheduled ? demo ? state.source.name : "Camera" : active ? demo ? "Opening video…" : "Connecting…" : "Not connected"));
   text("timeline-empty", demo ? "The first video preview will appear here when monitoring begins." : "The first preview will appear here after the camera connects.");
   text("preview-count", entries.length);
   text("shot-count", report.photos_taken || 0);
@@ -361,7 +362,7 @@ function renderMonitor() {
   $("call-count").title = `${report.compaction_requests || 0} context summary calls included · ${report.compactions_completed || 0} completed`;
   text("session-detail", failed ? ""
     : stopping ? "Waiting for an active operation to finish. A capture already sent to the camera may still complete."
-    : active ? ""
+    : scheduled ? `Starts at ${new Date(report.scheduled_start_at * 1000).toLocaleString()}` : active ? ""
     : reasons[report.stop_reason] || "This session has ended. Your files are saved locally.");
   text("output-path", !active && state.output ? `Saved in ${state.output}` : "");
   renderTimeline(entries);
@@ -379,7 +380,10 @@ function updateClock() {
   text("elapsed", clock(elapsed));
   let next = !connected ? "Connection lost · retrying…" : state.stopping ? "Finishing the current operation…" : !active ? "Session finished"
     : demo && (!report.phase || report.phase === "connecting") ? "Opening video…" : phases[report.phase] || phases.connecting;
-  if (connected && active && !state.stopping && report.phase === "waiting" && report.next_observation_at) {
+  if (connected && active && !state.stopping && report.phase === "scheduled") {
+    const remaining = Math.max(0, report.scheduled_start_at - Date.now() / 1000);
+    next = `Monitoring starts in ${clock(Math.ceil(remaining))}`;
+  } else if (connected && active && !state.stopping && report.phase === "waiting" && report.next_observation_at) {
     const remaining = Math.max(0, report.next_observation_at - Date.now() / 1000);
     next = `Next observation in ${clock(Math.ceil(remaining))}`;
   }

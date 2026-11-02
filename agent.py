@@ -1,10 +1,10 @@
-"""One append-only conversation per session, with signed native compaction."""
+"""Monitoring-only conversation history, with signed native compaction."""
 
 from copy import deepcopy
 from datetime import datetime, timezone
 
 from history import append_json, local_message
-from model import (INSTRUCTIONS, COMPACTION_BETA, MODEL, MAX_OUTPUT_TOKENS, check_capacity, make_payload,
+from model import (MONITORING_SYSTEM_PROMPT, COMPACTION_BETA, MODEL, MAX_OUTPUT_TOKENS, check_capacity, make_monitoring_payload,
                    make_compaction_payload, parse_compaction, parse_turn, response_usage)
 
 COMPACT_INPUT_TOKENS = 100_000
@@ -14,7 +14,7 @@ KEEP_OBSERVATIONS = 4
 COMPACTION_RETRY_SECONDS = 60
 
 
-class SessionAgent:
+class MonitoringAgent:
     def __init__(self, output):
         self.output = output
         self.messages, self.seen_ids, self.boundaries = [], set(), []
@@ -24,7 +24,7 @@ class SessionAgent:
         self.last_attempt_observation = -1
         self.log = output / "conversation.jsonl"
         payload = self.payload()
-        self.record("session", model=MODEL, system=INSTRUCTIONS, tools=payload["tools"],
+        self.record("session", model=MODEL, system=MONITORING_SYSTEM_PROMPT, tools=payload["tools"],
                     thinking=payload["thinking"], output_config=payload["output_config"], beta=COMPACTION_BETA)
 
     def record(self, kind, **details):
@@ -38,7 +38,7 @@ class SessionAgent:
         self.messages.append(message)
 
     def payload(self):
-        return make_payload(self.messages)
+        return make_monitoring_payload(self.messages)
 
     def accept_response(self, response, observation_id, input_tokens):
         call = parse_turn(response, self.seen_ids)

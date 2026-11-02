@@ -6,16 +6,33 @@ export class IntentReview {
     Object.assign(this, {request, accept, notify, started, cancelled});
     this.draft = null; this.busy = false;
     this.messageNodes = new Map();
+    try {
+      const saved = JSON.parse(localStorage.getItem("waitless.schedule"));
+      if (saved) {
+        $("start-delay").value = saved.start_delay_s / 60;
+        $("check-interval").value = saved.interval_s;
+        if (!this.schedule()) throw new Error("Invalid saved timing");
+      }
+    } catch {
+      $("start-delay").value = 0; $("check-interval").value = 60;
+    }
+    for (const id of ["start-delay", "check-interval"]) $(id).addEventListener("input", () => {
+      const timing = this.schedule();
+      if (timing) { try { localStorage.setItem("waitless.schedule", JSON.stringify(timing)); } catch {} }
+      this.controls();
+    });
     $("intent-refresh").addEventListener("click", () => this.draft
       ? this.perform("/api/intent/prepare", this.identity()) : this.perform("/api/check", {}));
     $("intent-cancel").addEventListener("click", async () => {
-      if (await this.perform("/api/intent/cancel", this.identity())) {
+      if (!this.draft || await this.perform("/api/intent/cancel", this.identity())) {
         $("intent-feedback").value = ""; this.cancelled();
       }
     });
     $("review-composer").addEventListener("submit", event => { event.preventDefault(); this.send(); });
     $("intent-start").addEventListener("click", async () => {
-      if (await this.perform("/api/start", this.identity())) this.started();
+      if ($("intent-start").disabled) return;
+      const timing = this.schedule();
+      if (timing && await this.perform("/api/start", {...this.identity(), ...timing})) this.started();
     });
     $("intent-feedback").addEventListener("input", () => this.controls());
     $("intent-feedback").addEventListener("keydown", event => {
@@ -26,6 +43,11 @@ export class IntentReview {
     });
   }
   identity() { return {intent_id: this.draft.id, revision: this.draft.revision}; }
+  schedule() {
+    const delay = $("start-delay"), interval = $("check-interval");
+    if (!delay.validity.valid || !interval.validity.valid) return null;
+    return {start_delay_s: delay.valueAsNumber * 60, interval_s: interval.valueAsNumber};
+  }
   render(state, connected = true, pending = false) {
     this.connected = connected; this.operation = state.operation; this.pending = pending;
     const draft = state.intent && !["approved", "cancelled"].includes(state.intent.status) ? state.intent : null;
@@ -48,10 +70,7 @@ export class IntentReview {
       $("intent-overlay").setAttribute("aria-label", `AI highlights: ${draft.targets.map(t => t.label).join(", ")}`);
     }
     $("intent-overlay").toggleAttribute("hidden", !draft?.targets.length);
-    $("intent-cancel").hidden = !draft;
     $("return-session").hidden = Boolean(draft) || !state.session_id;
-    $("review-footer").hidden = !draft;
-    $("intent-feedback").placeholder = draft ? "Correct a detail, answer a question, or ask “what if…”" : "Describe the moment you want to capture…";
     this.conversation(); this.controls();
   }
   controls() {
@@ -59,16 +78,19 @@ export class IntentReview {
     const active = this.draft?.status === "ready" && !locked;
     const message = $("intent-feedback").value.trim();
     const retry = this.draft?.error && this.draft.pending_message_id;
+    const timing = this.schedule();
+    $("start-delay").disabled = locked;
+    $("check-interval").disabled = locked;
+    $("intent-start").textContent = timing?.start_delay_s ? "Approve and schedule" : "Approve and start";
     $("intent-start").disabled = !active || this.draft.condition_stale ||
-      Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft));
+      Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
     $("intent-refine").disabled = locked || (this.draft && !this.draft.preview) || !(message || retry);
     $("intent-refine").textContent = !message && retry ? "Retry reply" : "Send ↑";
-    $("intent-feedback").disabled = this.draft ? locked : !this.connected || this.busy;
-    $("intent-refresh").disabled = locked || Boolean(this.draft && message);
-    $("intent-cancel").disabled = !this.connected || this.busy || this.pending;
+    $("intent-feedback").disabled = locked;
+    $("intent-refresh").disabled = locked || Boolean(message);
+    $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
     const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;
-    $("review-thinking").textContent = this.draft?.status === "preparing" ? "Looking at your reference…" : "Considering your reply…";
   }
   conversation() {
     const log = $("review-messages"), turns = this.draft?.conversation || [];

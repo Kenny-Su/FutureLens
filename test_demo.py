@@ -94,7 +94,7 @@ class DemoTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 DemoVideo.inspect(path, "invalid.mp4")
 
-    def run_demo(self, action="shoot", delay=1.5):
+    def run_demo(self, action="shoot", delay=1.5, **timing):
         output = self.root / "session"
         def reply(payload, *_args, **_kwargs):
             self.clock.sleep(delay)
@@ -104,7 +104,7 @@ class DemoTests(unittest.TestCase):
                 patch("waitless.count_tokens", return_value=1000), \
                 patch("waitless.call_model", side_effect=reply), \
                 patch("waitless.time.sleep", side_effect=self.clock.sleep):
-            run_session(SessionSettings("scene"), output, approved_intent=approval(self.root / "review"), video=self.video)
+            run_session(SessionSettings("scene", **timing), output, approved_intent=approval(self.root / "review"), video=self.video)
             sony.assert_not_called()
         return json.loads((output / "results.json").read_text())
 
@@ -117,6 +117,12 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(entry["video_capture_position_s"], 1.5)
         self.assertTrue((self.root / "session" / entry["saved_files"][0]).is_file())
         self.assertAlmostEqual(self.clock.now, 104)
+
+    def test_start_delay_keeps_video_at_zero_until_monitoring_begins(self):
+        report = self.run_demo(start_delay_s=1200, interval_s=10)
+        self.assertEqual(report["observations"][0]["video_position_s"], 0)
+        self.assertEqual(report["observations"][0]["video_capture_position_s"], 1.5)
+        self.assertAlmostEqual(self.clock.now, 1304)
 
     def test_late_model_reply_does_not_capture_after_video_end(self):
         report = self.run_demo(delay=5)

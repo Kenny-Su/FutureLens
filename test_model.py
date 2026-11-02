@@ -18,8 +18,6 @@ from test_intent import snapshot
 def tool(name, arguments=None, call_id="call-1"):
     if name == "shoot" and arguments is None:
         arguments = {"snapshot": snapshot()}
-    if name == "set_preview_interval":
-        arguments = {"snapshot": snapshot(condition="unmet"), "wait_reason": "condition_unmet", **(arguments or {})}
     return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": call_id,
             "name": name, "input": arguments or {}}]}
 
@@ -48,9 +46,11 @@ class ModelTests(unittest.TestCase):
     def test_image_encoding_and_cached_conversation_payload(self):
         image = Image.new("RGB", (1920, 1080), "green")
         messages = [{"role": "user", "content": [model.image_content(image)]}]
-        payload = model.make_payload(messages)
+        payload = model.make_monitoring_payload(messages)
         self.assertEqual(payload["model"], "claude-haiku-5-5")
-        self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot", "set_preview_interval"])
+        self.assertEqual(payload["system"], model.MONITORING_SYSTEM_PROMPT)
+        self.assertNotEqual(payload["system"], model.ALIGNMENT_SYSTEM_PROMPT)
+        self.assertEqual([t["name"] for t in payload["tools"]], ["list_history", "get_history", "shoot"])
         self.assertEqual(payload["tool_choice"], {"type": "auto", "disable_parallel_tool_use": True})
         self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
         encoded = base64.b64decode(payload["messages"][0]["content"][0]["source"]["data"])
@@ -85,7 +85,7 @@ class ModelTests(unittest.TestCase):
             model.parse_turn(tool("shoot"), seen)
 
     def test_image_and_exact_encoded_byte_capacity(self):
-        payload = model.make_payload([{"role": "user", "content": [model.image_content(Image.new("RGB", (8, 8)))]}])
+        payload = model.make_monitoring_payload([{"role": "user", "content": [model.image_content(Image.new("RGB", (8, 8)))]}])
         size = len(model.encode_payload(payload))
         with patch("model.MAX_REQUEST_BYTES", size):
             self.assertEqual(model.check_capacity(payload), {"images": 1, "request_bytes": size})
@@ -104,7 +104,7 @@ class ModelTests(unittest.TestCase):
     def test_thinking_blocks_are_context_and_do_not_relax_tool_validation(self):
         blocks = [{"type": "thinking", "thinking": "", "signature": "opaque-signature"},
                   {"type": "redacted_thinking", "data": "opaque-encrypted-data"}]
-        for action in (answer("wait"), tool("set_preview_interval", {"seconds": 10}), answer("shoot")):
+        for action in (answer("wait"), tool("list_history"), answer("shoot")):
             response = {**action, "content": blocks + action["content"]}
             parsed = model.parse_turn(response, set())
             self.assertEqual(parsed, action["content"][0] if action["stop_reason"] == "tool_use" else None)
@@ -124,7 +124,7 @@ class ModelTests(unittest.TestCase):
             model.parse_turn({"stop_reason": "max_tokens", "content": blocks + answer("shoot")["content"]}, set())
 
     def test_token_count_checks_the_same_prompt_format_and_cache_settings(self):
-        payload = model.make_payload([{"role": "user", "content": [model.text_content("sunrise")]}])
+        payload = model.make_monitoring_payload([{"role": "user", "content": [model.text_content("sunrise")]}])
         with patch("model.request.build_opener") as opener:
             opener.return_value.open.return_value = io.BytesIO(b'{"input_tokens":990000}')
             self.assertEqual(model.count_tokens(payload, self.config, timeout=7), 990000)
@@ -154,7 +154,7 @@ class ModelTests(unittest.TestCase):
                        'ANTHROPIC_BASE_URL=https://example.com/another-gateway/v1\n'
                        'ANTHROPIC_MODEL=another-model\n')
         config = model.load_config(env)
-        payload = model.make_payload([])
+        payload = model.make_monitoring_payload([])
         with patch("model.request.build_opener") as opener:
             opener.return_value.open.return_value = io.BytesIO(json.dumps(answer("wait")).encode())
             response = model.call_model(payload, config, timeout=2.5)
@@ -171,7 +171,7 @@ class ModelTests(unittest.TestCase):
 
     def test_compaction_request_and_signed_result_protocol(self):
         messages = [{"role": "user", "content": [model.text_content("session")]}]
-        ordinary = model.make_payload(messages)
+        ordinary = model.make_monitoring_payload(messages)
         ordinary["output_config"].pop("format")
         summary = model.make_compaction_payload(messages)
         self.assertEqual({k: v for k, v in summary.items() if k != "compaction"}, ordinary)
@@ -203,13 +203,18 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(count.call_args.args[0], payload)
         self.assertNotIn("tools", payload)
         self.assertNotIn("tool_choice", payload)
+        self.assertEqual(payload["system"], model.ALIGNMENT_SYSTEM_PROMPT)
+        self.assertEqual(payload["output_config"]["format"]["schema"], model.REVIEW_SCHEMA)
+        self.assertEqual(payload["thinking"], {"type": "adaptive", "display": "omitted"})
+        self.assertEqual(payload["output_config"]["effort"], "medium")
         context = json.loads(payload["messages"][0]["content"][-2]["text"])
         self.assertEqual((context["image_width"], context["image_height"]), (960, 540))
         self.assertEqual(context["previous_interpretation"], previous)
+        self.assertEqual(context["previous_box_units"], "normalized_0_1")
         self.assertEqual(result["targets"][0]["box"], [.1, .1, .5, .5])
         with Image.open(io.BytesIO(base64.b64decode(payload["messages"][0]["content"][-1]["source"]["data"]))) as sent:
             self.assertEqual(sent.size, (960, 540))
-        self.assertEqual(model.make_payload([])["output_config"]["format"]["schema"], model.WAIT_SCHEMA)
+        self.assertEqual(model.make_monitoring_payload([])["output_config"]["format"]["schema"], model.WAIT_SCHEMA)
 
     def test_review_replays_discussion_and_can_replace_or_clear_its_highlights(self):
         from test_intent import plan, review_reply

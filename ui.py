@@ -26,7 +26,7 @@ MAX_VIDEO_BYTES = 2 * 1024**3
 
 
 def session_settings(data):
-    if not isinstance(data, dict) or set(data) - {"request"}:
+    if not isinstance(data, dict) or set(data) - {"request", "interval_s", "start_delay_s"}:
         raise ValueError("Invalid session settings.")
     return SessionSettings(**{"request": "", **data})
 
@@ -68,11 +68,12 @@ class SessionManager:
             if self.operation is not None:
                 raise ValueError("A camera operation is already running.")
             draft = self._draft(data)
-            if (set(data) != {"intent_id", "revision"} or draft["status"] != "ready"
+            if (set(data) - {"intent_id", "revision", "interval_s", "start_delay_s"} or draft["status"] != "ready"
                     or draft.get("condition_stale") or draft.get("question") or draft.get("pending_message_id")):
                 raise ValueError("Review the current interpretation before starting.")
             output = self._folder("session")
-            settings = session_settings({"request": draft["request"]})
+            settings = session_settings({"request": draft["request"],
+                **{key: data[key] for key in ("interval_s", "start_delay_s") if key in data}})
             validate_config(load_config())
             if self.demo_video is None and not self.helper.is_file():
                 raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
@@ -126,6 +127,8 @@ class SessionManager:
                     raise ValueError("Only a pending review can refresh its reference.")
                 settings = session_settings({"request": previous["request"]})
             else:
+                if not isinstance(data, dict) or set(data) != {"request"}:
+                    raise ValueError("Enter an instruction to begin the review.")
                 settings = session_settings(data)
             self.intent_generation += 1
             generation = self.intent_generation

@@ -44,6 +44,10 @@
 .composer-actions { display:flex; justify-content:flex-end; margin-top:10px; }
 .review-footer { display:flex; justify-content:space-between; align-items:center; gap:16px; border-top:1px solid var(--border); padding:20px 0; margin-top:24px; }
 .review-footer #intent-start { margin-left:auto; }
+.schedule-controls { display:flex; flex-wrap:wrap; gap:16px 24px; }
+.schedule-controls label { display:grid; gap:6px; color:var(--muted); font-size:12px; }
+.schedule-input { display:flex; align-items:center; gap:8px; }
+.schedule-input input { width:85px; padding:8px 10px; background:var(--bg); border:1px solid var(--border); border-radius:7px; color:var(--text); }
 .intent-error { color:var(--red); margin:12px 0; }
 .intent-error:empty { display:none; }
 .preview-annotations { padding:10px 14px; }

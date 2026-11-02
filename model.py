@@ -1,4 +1,4 @@
-"""Claude conversation payloads, capacity checks, and fixed-endpoint transport."""
+"""Separate alignment and monitoring modes over the shared Claude transport."""
 
 import base64
 from dataclasses import dataclass, field
@@ -10,38 +10,18 @@ import re
 from urllib import error, request
 
 from PIL import Image
-from intent import (REVIEW_SCHEMA, SNAPSHOT_SCHEMA, WAIT_SCHEMA, WAIT_REASON_SCHEMA,
+from intent import (REVIEW_SCHEMA, SNAPSHOT_SCHEMA, WAIT_SCHEMA,
                     json_response, validate_review)
 
-INSTRUCTIONS = """You help a photographer capture moments that match their instruction.
-Evaluate each new preview and call shoot when the requested condition is met.
-Use list_history and get_history when you need earlier previews.
-Use set_preview_interval to adjust preview timing as needed based on the user's
-instruction and the current state.
-The photographer's approved_intent capture condition is authoritative. Each observation includes a labeled REFERENCE image
-and a CURRENT image. Evaluate the full CURRENT scene. The reference is not current
-evidence. Optional reviewed highlights illustrate visible details in the reference;
-they are not a required inventory of subjects. An empty targets array is valid.
-The approved condition fully explains when to take a photo, including subjects or
-events that were not visible in the reference.
-Use that context to evaluate the approved capture condition. Monitoring
-responses report only the condition assessment, not target locations or visibility
-lists. If uncertain identity prevents evaluating the condition, report condition
-uncertain and do not shoot. Absence
-is distinct from uncertainty and may satisfy a negative condition such as an empty chair.
-Include a snapshot with only frame_id, intent_revision, and condition in shoot and
-set_preview_interval. Shoot only when condition is met. When it is met and the
-requested photograph is still due, call shoot now rather than wait or change the
-interval. Respect the instruction's quantity, repetition, and timing constraints;
-one downloaded photo satisfies a one-photo request, but not a request for new moments.
-Every wait response and set_preview_interval call needs a wait_reason:
-condition_unmet or condition_uncertain must match the snapshot condition;
-already_captured means the requested occurrence or quantity was already downloaded,
-as supported by session capture history; cooldown requires an active capture cooldown.
-If a required timing or change trigger has not occurred, the condition is unmet.
-If no photograph or interval change is needed, return the structured wait response
-with its snapshot and wait_reason, without calling a tool. Monitoring continues
-automatically. Do not add free-form explanations."""
+ALIGNMENT_SYSTEM_PROMPT = """Agree with the photographer on when to fire the shutter.
+Explain your understanding concisely, follow corrections, and ask for clarification when needed.
+Highlight visible objects in the preview with boxes if helpful.
+Keep condition as the complete agreed shutter rule."""
+
+MONITORING_SYSTEM_PROMPT = """Evaluate the CURRENT preview against the approved shutter condition.
+Use the REFERENCE image and earlier previews as context.
+Call shoot when the condition is met and a requested photo is still due; otherwise return a wait assessment.
+Respect the agreed quantity, repetition, and timing. Report uncertain when you cannot determine whether the condition is met."""
 
 API_VERSION = "2026-10-21"
 COMPACTION_BETA = "compact-2026-09-04"
@@ -55,10 +35,7 @@ MAX_IMAGES = 600
 MAX_REQUEST_BYTES = 30_000_000
 MAX_INPUT_TOKENS = 990_000
 MAX_CALLS_PER_OBSERVATION = 6
-AUTO_MIN_INTERVAL = 10
-AUTO_MAX_INTERVAL = 300
-AUTO_INITIAL_INTERVAL = 60
-TOOLS = [
+MONITORING_TOOLS = [
     {"name": "list_history", "description": "List earlier preview IDs, timestamps, and capture outcomes, newest first. Time filters are inclusive seconds since session start; cursor is an exclusive preview ID. Use next_cursor for pagination. Default limit: 20.",
      "input_schema": {"type": "object", "properties": {
          "start_s": {"type": "number", "minimum": 0}, "end_s": {"type": "number", "minimum": 0},
@@ -72,12 +49,6 @@ TOOLS = [
     {"name": "shoot", "description": "Request one photograph based on the latest preview. Ends this observation even if capture is skipped. Only downloaded confirms success. Do not retry an uncertain capture.",
      "input_schema": {"type": "object", "properties": {"snapshot": SNAPSHOT_SCHEMA},
                       "required": ["snapshot"], "additionalProperties": False}},
-    {"name": "set_preview_interval", "description": "Change the interval between previews, measured from the latest preview. Use only when seconds differs from sampling.current_interval_s. The setting persists until changed. Ends this observation without taking a photograph.",
-     "input_schema": {"type": "object", "properties": {
-         "snapshot": SNAPSHOT_SCHEMA, "wait_reason": WAIT_REASON_SCHEMA,
-         "seconds": {"type": "integer", "minimum": AUTO_MIN_INTERVAL, "maximum": AUTO_MAX_INTERVAL,
-                     "description": "The new interval; must differ from the latest sampling.current_interval_s."}},
-         "required": ["seconds", "snapshot", "wait_reason"], "additionalProperties": False}},
 ]
 
 
@@ -135,35 +106,35 @@ def text_content(value) -> dict:
     return {"type": "text", "text": json.dumps(value, ensure_ascii=False)}
 
 
-def make_payload(messages: list) -> dict:
+def _base_payload(messages, *, system, schema):
+    """Shared model settings; each mode supplies its own task and response format."""
     return {
         "model": MODEL,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        "system": INSTRUCTIONS,
+        "system": system,
         "thinking": dict(THINKING),
         "messages": list(messages),
         "cache_control": {"type": "ephemeral"},
-        "output_config": {"effort": EFFORT, "format": {"type": "json_schema", "schema": WAIT_SCHEMA}},
-        "tools": list(TOOLS),
-        "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+        "output_config": {"effort": EFFORT, "format": {"type": "json_schema", "schema": schema}},
     }
 
 
-def make_compaction_payload(messages: list) -> dict:
-    payload = make_payload(messages)
+def make_monitoring_payload(messages):
+    payload = _base_payload(messages, system=MONITORING_SYSTEM_PROMPT, schema=WAIT_SCHEMA)
+    payload.update(tools=list(MONITORING_TOOLS),
+                   tool_choice={"type": "auto", "disable_parallel_tool_use": True})
+    return payload
+
+
+def make_compaction_payload(messages):
+    payload = make_monitoring_payload(messages)
     payload["output_config"].pop("format")
     payload["compaction"] = {"type": "summarize"}
     return payload
 
 
-REVIEW_INSTRUCTIONS = """Explain when you'll shoot in concise language.
-Follow the photographer's corrections; keep condition as the agreed shutter rule.
-Highlight visible objects in the preview if helpful, using [x1,y1,x2,y2] pixel boxes; previous boxes are normalized 0–1.
-Ask a question for clarification if needed; otherwise leave question empty."""
-
-
-def _review_payload(request_text, image, conversation, context):
-    """Replay the discussion and the AI's previous whiteboard illustrations."""
+def make_alignment_payload(request_text, image, conversation, context):
+    """Alignment has its own discussion and response format, with no capture tools."""
     messages = []
     for turn in conversation or [{"role": "user", "text": request_text}]:
         if turn["role"] == "assistant":
@@ -181,20 +152,15 @@ def _review_payload(request_text, image, conversation, context):
         messages[-1]["content"].extend(evidence)
     else:
         messages.append({"role": "user", "content": evidence})
-    payload = make_payload(messages)
-    payload["system"] = REVIEW_INSTRUCTIONS
-    payload.pop("tools")
-    payload.pop("tool_choice")
-    payload["output_config"]["format"]["schema"] = REVIEW_SCHEMA
-    return payload
+    return _base_payload(messages, system=ALIGNMENT_SYSTEM_PROMPT, schema=REVIEW_SCHEMA)
 
 
 def review_intent(request_text, image, config, *, conversation=None, previous=None, reference_changed=False):
     """Explain the shutter condition with optional, model-controlled highlights."""
     image = model_image(image)
-    payload = _review_payload(request_text, image, conversation,
-                              {"previous_interpretation": previous,
-                               "reference": "NEW reference image" if reference_changed else "CURRENT saved reference image"})
+    payload = make_alignment_payload(request_text, image, conversation,
+                                     {"previous_interpretation": previous, "previous_box_units": "normalized_0_1",
+                                      "reference": "NEW reference image" if reference_changed else "CURRENT saved reference image"})
     check_capacity(payload)
     count_tokens(payload, config)
     return validate_review(json_response(call_model(payload, config)), width=image.width, height=image.height)
@@ -353,7 +319,7 @@ def parse_turn(response: dict, seen_ids: set) -> dict | None:
             continue
         if block.get("type") != "tool_use":
             raise ValueError("Unexpected model content block")
-        if (block.get("name") not in {tool["name"] for tool in TOOLS}
+        if (block.get("name") not in {tool["name"] for tool in MONITORING_TOOLS}
                 or not isinstance(block.get("id"), str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", block["id"])
                 or not isinstance(block.get("input"), dict)):

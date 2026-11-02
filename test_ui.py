@@ -121,7 +121,7 @@ class InterfaceTests(unittest.TestCase):
                 patch("waitless.call_model", side_effect=lambda payload, *_a, **_k: bind_snapshot(answer("shoot"), payload)) as inference, \
                 patch("waitless.write_json", side_effect=publish), \
                 patch("waitless.time.monotonic", side_effect=clock.monotonic):
-            self.manager.start(self.start_data("Capture this scene"))
+            self.manager.start({**self.start_data("Capture this scene"), "interval_s": 10, "start_delay_s": 0})
             self.assertTrue(waiting.wait(2))
             self.assertEqual(self.manager.operation, "monitor")
             self.manager.stop()
@@ -131,8 +131,8 @@ class InterfaceTests(unittest.TestCase):
         self.assertIsNone(state["error"])
         self.assertIsNone(state["camera_check"])
         report = state["report"]
-        self.assertEqual(report["current_interval_s"], 60)
-        self.assertEqual(report["settings"], {"cooldown": 5, "max_frame_age": 30})
+        self.assertEqual(report["current_interval_s"], 10)
+        self.assertEqual(report["settings"], {"cooldown": 5, "max_frame_age": 30, "interval_s": 10, "start_delay_s": 0})
         self.assertEqual((report["status"], report["stop_reason"], report["photos_taken"]),
                          ("stopped", "user_stop", 1))
         entry = report["observations"][0]
@@ -143,6 +143,47 @@ class InterfaceTests(unittest.TestCase):
         self.assertNotIn('"base64"', json.dumps(state))
         self.assertTrue(self.manager.media_file(state["session_id"], entry["saved_files"][0]).is_file())
         inference.assert_called_once()
+
+    def test_invalid_timing_cannot_approve_or_start_a_session(self):
+        identity = self.start_data()
+        with patch("ui.run_session") as run, patch("ui.SonyCamera") as camera:
+            for timing in ({"interval_s": 0}, {"interval_s": True}, {"interval_s": "10"},
+                           {"start_delay_s": -1}, {"start_delay_s": 86401}, {"start_delay_s": .5}):
+                with self.subTest(timing=timing), self.assertRaises(ValueError):
+                    self.manager.start({**identity, **timing})
+                self.assertEqual(self.manager.intent["status"], "ready")
+                self.assertIsNone(self.manager.operation)
+            run.assert_not_called()
+            camera.assert_not_called()
+
+    def test_scheduled_session_survives_state_reads_and_blocks_other_operations(self):
+        waiting = threading.Event()
+        from waitless import write_json
+        def publish(path, report):
+            write_json(path, report)
+            if report.get("phase") == "scheduled":
+                waiting.set()
+        with patch("waitless.load_config", return_value=ApiConfig(api_key="offline")), \
+                patch("waitless.write_json", side_effect=publish), \
+                patch("waitless.SonyCamera") as camera, patch("waitless.call_model") as model:
+            self.manager.start({**self.start_data(), "interval_s": 10, "start_delay_s": 1200})
+            try:
+                self.assertTrue(waiting.wait(2))
+                state = self.manager.state()
+                refreshed = self.manager.state()
+                self.assertEqual(state["report"]["scheduled_start_at"], refreshed["report"]["scheduled_start_at"])
+                self.assertEqual(state["report"]["settings"]["interval_s"], 10)
+                self.assertEqual(state["operation"], "monitor")
+                with self.assertRaises(ValueError):
+                    self.manager.check_camera()
+                with self.assertRaises(ValueError):
+                    self.manager.prepare_intent({"request": "other"})
+            finally:
+                self.manager.stop()
+                self.manager.worker.join(2)
+            camera.assert_not_called()
+            model.assert_not_called()
+        self.assertEqual(self.manager.state()["report"]["status"], "stopped")
 
     def test_only_one_session_owns_camera_and_stop_reaches_runner(self):
         entered = threading.Event()
@@ -412,6 +453,7 @@ class InterfaceTests(unittest.TestCase):
             self.manager.start({**identity, "revision": 7})
             self.manager.worker.join(2)
             self.assertEqual(run.call_args.kwargs["approved_intent"].data["condition"], replies[-1]["condition"])
+            self.assertNotIn("conversation", run.call_args.kwargs["approved_intent"].data)
 
     def test_failed_reply_retries_same_message_without_losing_the_exchange(self):
         identity = self.start_data()
