@@ -9,7 +9,7 @@ import shutil
 import time
 from urllib.parse import urlsplit
 
-from camera import SonyCamera, CameraError, DEFAULT_HELPER
+from camera import MacCamera, CameraError
 from demo import VideoCamera, VideoEnded
 from agent import (MonitoringAgent, COMPACT_INPUT_TOKENS, COMPACT_REQUEST_BYTES, COMPACT_IMAGES,
                    KEEP_OBSERVATIONS, COMPACTION_RETRY_SECONDS)
@@ -403,12 +403,13 @@ class Monitor:
         self.report["context_revision"] = self.agent.revision
         event("completed", context_revision=self.agent.revision, usage=response_usage(response))
 
-    def run(self, camera_helper, video=None):
+    def run(self, camera_id, video=None):
         source = (VideoCamera(video, self.output / "moments", enable_capture=True) if video else
-                  SonyCamera(self.output / "moments", enable_capture=True, helper=camera_helper))
+                  MacCamera(self.output / "moments", enable_capture=True, device_id=camera_id))
         with source as self.camera:
             self.report.update(camera_model=self.camera.model,
-                               source=f"video:{video.name}" if video else f"sony:usb:{self.camera.model}",
+                               source=f"video:{video.name}" if video else f"macos:{self.camera.model}",
+                               camera_id=camera_id if not video else None,
                                camera_capabilities=self.camera.capabilities,
                                monitoring_started_at=datetime.now(timezone.utc).isoformat())
             self.publish()
@@ -475,11 +476,16 @@ class Monitor:
 
 
 def run_session(settings: SessionSettings, output: Path, *, approved_intent: ApprovedIntent,
-                camera_helper=DEFAULT_HELPER, stop_event=None, video=None) -> Path:
+                camera_id=None, stop_event=None, video=None) -> Path:
     start_deadline = time.monotonic() + settings.start_delay_s
     scheduled_start_at = time.time() + settings.start_delay_s
     if not isinstance(approved_intent, ApprovedIntent) or approved_intent.data["request"] != settings.request:
         raise ValueError("A matching approved intent is required before monitoring.")
+    source = approved_intent.data.get("source", {})
+    if (source.get("mode") != ("video" if video else "camera")
+            or source.get("id") != (video.metadata()["id"] if video else camera_id)
+            or (not video and not camera_id)):
+        raise ValueError("Review the selected camera or video before monitoring.")
     config = load_config()
     validate_config(config)
     output = Path(output).resolve()
@@ -489,7 +495,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     write_json(output / "intent.json", approved_intent.data)
     report = {
         "status": "running", "phase": "scheduled" if settings.start_delay_s else "connecting",
-        "scheduled_start_at": scheduled_start_at, "mode": "demo_video" if video else "sony_usb",
+        "scheduled_start_at": scheduled_start_at, "mode": "demo_video" if video else "macos_camera",
         "provider": "anthropic", "model": MODEL,
         "intent": approved_intent.data,
         "model_settings": {"effort": EFFORT, "thinking": THINKING["type"],
@@ -497,7 +503,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
                            "automatic_prompt_caching": True},
         "api_host": urlsplit(API_ENDPOINT).hostname,
         "instructions": MONITORING_SYSTEM_PROMPT, "request": settings.request,
-        "source": f"video:{video.name}" if video else "sony:usb", "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": f"video:{video.name}" if video else "macos:camera", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
                      ("cooldown", "max_frame_age", "interval_s", "start_delay_s")},
         "current_interval_s": settings.interval_s,
@@ -526,7 +532,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
         report["phase"] = "connecting"
         write_json(output / "results.json", report)
         check_stop(stop_event)
-        return Monitor(settings, config, output, report, stop_event).run(camera_helper, video)
+        return Monitor(settings, config, output, report, stop_event).run(camera_id, video)
     except SessionStopped:
         report.update(status="stopped", stop_reason="user_stop")
         return output
@@ -537,7 +543,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     except Exception as exc:
         report.update(status="failed", error_type=type(exc).__name__)
         if isinstance(exc, CameraError):
-            report.update(camera_model=exc.model, source=f"sony:usb:{exc.model}",
+            report.update(camera_model=exc.model, source=f"macos:{exc.model}",
                           camera_capabilities=exc.capabilities, camera_error=str(exc))
         if isinstance(exc, ApiError):
             report["api_error"] = exc.details

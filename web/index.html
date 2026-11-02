@@ -26,7 +26,15 @@
       <p id="intent-error" class="intent-error" role="alert"></p>
       <div class="review-grid">
         <div class="review-visual">
-          <div class="source-toolbar"><div class="source-actions"><button id="source-camera" class="button secondary" type="button" disabled>Connect camera</button><button id="source-video" class="button secondary" type="button" disabled>Import video</button><input id="demo-file" type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.avi" hidden></div><span id="source-detail" class="muted small"></span></div>
+          <div class="source-toolbar">
+            <div class="camera-picker">
+              <label class="sr-only" for="camera-input">Camera input</label>
+              <select id="camera-input" disabled><option value="">Choose camera…</option></select>
+              <button id="find-cameras" class="button secondary" type="button" disabled>Find cameras</button>
+              <button id="source-camera" class="button secondary" type="button" disabled>Connect</button>
+            </div>
+            <div class="source-actions"><button id="source-video" class="text-button" type="button" disabled>Import video</button><input id="demo-file" type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.avi" hidden><span id="source-detail" class="muted small"></span></div>
+          </div>
           <div id="intent-image-wrap" class="image-surface"><div id="intent-preview-empty" class="preview-placeholder" role="status">Connect a camera or import a video.</div><img id="intent-image" alt="Reference preview for discussing your photograph" hidden><svg id="intent-overlay" class="intent-overlay" role="img" aria-label="AI highlights" hidden></svg></div>
           <div class="review-image-toolbar"><span id="intent-reference-time" class="muted small"></span><button id="intent-refresh" class="text-button" type="button" disabled>Refresh preview</button></div>
           <div class="schedule-controls" role="group" aria-label="Monitoring timing">

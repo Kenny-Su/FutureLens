@@ -1,18 +1,67 @@
-"""Auto-detect a Sony USB camera and check its live-view/photo capabilities."""
+"""Native macOS camera inputs, including iPhone Continuity Camera."""
 
 from dataclasses import dataclass
 import io
 import json
 import math
 from pathlib import Path
+import platform
 import queue
+import shutil
 import subprocess
+import sys
 import threading
 import time
 
 from PIL import Image
 
-DEFAULT_HELPER = Path(__file__).with_name("runtime") / "sony/macos/sony_camera"
+ROOT = Path(__file__).resolve().parent
+CAMERA_APP = ROOT / "build/WaitLess Camera.app"
+DEFAULT_HELPER = CAMERA_APP / "Contents/MacOS/waitless-camera"
+BUILD_LOCK = threading.Lock()
+
+
+def camera_helper():
+    """Build the small native adapter on demand; no vendor SDK or binary bundle."""
+    if sys.platform != "darwin":
+        raise RuntimeError("Native camera input requires macOS 14 or later. You can still import a video.")
+    source, info = ROOT / "native/macos_camera.swift", ROOT / "native/Info.plist"
+    with BUILD_LOCK:
+        if DEFAULT_HELPER.is_file() and DEFAULT_HELPER.stat().st_mtime >= max(source.stat().st_mtime, info.stat().st_mtime):
+            return DEFAULT_HELPER
+        DEFAULT_HELPER.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(info, CAMERA_APP / "Contents/Info.plist")
+        try:
+            subprocess.run(["xcrun", "swiftc", "-O", "-swift-version", "5",
+                            "-target", f"{platform.machine()}-apple-macos14.0",
+                            "-module-cache-path", str(ROOT / "build/ModuleCache"),
+                            str(source), "-o", str(DEFAULT_HELPER)], check=True, capture_output=True, timeout=120)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(CAMERA_APP)],
+                           check=True, capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            DEFAULT_HELPER.unlink(missing_ok=True)
+            details = getattr(exc, "stderr", b"") or b""
+            raise RuntimeError("Could not build native camera support. Install Apple's Command Line Tools with "
+                               f"xcode-select --install. {details.decode(errors='replace')[-2000:]}") from exc
+    return DEFAULT_HELPER
+
+
+def list_cameras():
+    try:
+        result = subprocess.run([str(camera_helper()), "--list"], capture_output=True, timeout=100)
+        event = json.loads(result.stdout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Camera permission is waiting. Allow access and try Find cameras again.") from None
+    except (OSError, ValueError):
+        raise RuntimeError("Could not list macOS cameras. Check camera access in System Settings.") from None
+    if event.get("event") == "error":
+        raise RuntimeError(event["message"])
+    devices = event.get("devices")
+    if result.returncode or event.get("event") != "devices" or not isinstance(devices, list):
+        raise RuntimeError("The native camera adapter returned an invalid device list.")
+    if any(not isinstance(d, dict) or any(not isinstance(d.get(k), str) or not d[k] for k in ("id", "name", "kind")) for d in devices):
+        raise RuntimeError("The native camera adapter returned an invalid device.")
+    return devices
 
 
 @dataclass
@@ -29,12 +78,14 @@ class CameraError(RuntimeError):
         self.capabilities = capabilities
 
 
-class SonyCamera:
-    """One SDK process, one request at a time, no queued preview frames."""
+class MacCamera:
+    """One selected input, one request at a time; only fresh frames are returned."""
 
-    def __init__(self, output: Path, *, enable_capture=False, helper=DEFAULT_HELPER):
+    def __init__(self, output: Path, *, device_id, enable_capture=False):
         self.output = Path(output).resolve()
-        self.helper = Path(helper).resolve()
+        if not isinstance(device_id, str) or not device_id:
+            raise ValueError("Choose a camera input first.")
+        self.device_id = device_id
         self.enable_capture = enable_capture
         self.process = None
         self.log = None
@@ -44,24 +95,11 @@ class SonyCamera:
         self.capabilities = {}
 
     def _accept_camera(self, event):
-        if event.get("connection") != "USB" or not isinstance(event.get("model"), str) or not event["model"]:
-            raise RuntimeError("Camera helper returned invalid USB camera information")
+        if event.get("device_id") != self.device_id or not isinstance(event.get("model"), str) or not event["model"]:
+            raise RuntimeError("Camera helper returned a different camera input")
         self.model = event["model"]
-        caps = event.get("capabilities")
-        if (not isinstance(caps, dict) or any(type(caps.get(key)) is not bool for key in ("live_view", "capture_ready"))
-                or any(not isinstance(caps.get(key), list) or any(not isinstance(value, str) for value in caps[key])
-                       for key in ("preview_issues", "capture_issues"))):
-            raise RuntimeError("Camera helper returned invalid capability information")
-        self.capabilities = caps
-        issues = list(caps["preview_issues"])
-        if not caps["live_view"] and not issues:
-            issues.append("Live view is unavailable.")
-        if self.enable_capture:
-            issues.extend(caps["capture_issues"])
-            if not caps["capture_ready"] and not issues:
-                issues.append("Still-photo capture is unavailable.")
-        if issues:
-            raise CameraError(f"{self.model}: {' '.join(issues)}", self.model, caps)
+        self.capabilities = {"live_view": True, "capture_ready": True,
+                             "preview_issues": [], "capture_issues": [], "capture_kind": "stream_frame"}
 
     def _read_output(self):
         try:
@@ -78,7 +116,7 @@ class SonyCamera:
         except (ValueError, OSError, RuntimeError) as exc:
             self.events.put({"event": "error", "message": str(exc)})
         finally:
-            self.events.put({"event": "error", "message": "Camera helper exited; see camera-sdk.log"})
+            self.events.put({"event": "error", "message": "Camera input exited; see camera.log"})
 
     def _receive(self, expected, timeout=20):
         try:
@@ -98,22 +136,15 @@ class SonyCamera:
         self.process.stdin.flush()
 
     def __enter__(self):
-        if not self.helper.is_file():
-            raise RuntimeError("The bundled camera runtime is missing. Restore runtime/sony from the WaitLess repository.")
         self.output.mkdir(parents=True, exist_ok=True)
-        self.log = (self.output.parent / "camera-sdk.log").open("wb")
-        command = [str(self.helper), str(self.output)]
-        if self.enable_capture:
-            command.append("--enable-capture")
+        command = [str(camera_helper()), "--device", self.device_id]
+        self.log = (self.output.parent / "camera.log").open("wb")
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=self.log, start_new_session=True)
             self.reader = threading.Thread(target=self._read_output, daemon=True)
             self.reader.start()
-            self._accept_camera(self._receive("ready", timeout=30))
-            if self.enable_capture:
-                self._send("PREPARE")
-                self._receive("prepared")
+            self._accept_camera(self._receive("ready", timeout=100))
             return self
         except BaseException as exc:
             self.close()
@@ -121,32 +152,36 @@ class SonyCamera:
                 raise CameraError(str(exc), self.model, self.capabilities) from None
             raise
 
-    def latest_frame(self):
-        # Timestamp the request, conservatively including SDK retrieval and decode time.
+    def _frame(self, timeout=15):
         requested_at = time.monotonic()
-        self._send("FRAME")
-        event = self._receive("frame")
+        self._send(f"FRAME {timeout:.6f}")
+        event = self._receive("frame", timeout=timeout + 5)
+        return event, requested_at
+
+    def latest_frame(self):
+        event, requested_at = self._frame()
         with Image.open(io.BytesIO(event["data"])) as image:
             frame = image.convert("RGB")
         return CameraFrame(frame, requested_at, event["frame_no"])
 
     def capture(self, capture_id: int, on_shutter=None, max_delay=10):
         if not self.enable_capture:
-            raise RuntimeError("Shutter control is disabled in preview mode")
+            raise RuntimeError("Photo saving is disabled in preview mode")
         if type(capture_id) is not int or capture_id < 0:
             raise ValueError("Capture ID must be a non-negative integer")
         if not math.isfinite(max_delay) or max_delay <= 0:
             raise ValueError("Capture expiry must be finite and positive")
-        self._send(f"CAPTURE {capture_id:05d} {max_delay:.6f}")
-        self._receive("shutter_sent")
+        deadline = time.monotonic() + max_delay
+        event, _ = self._frame(timeout=min(max_delay, 15))
+        if time.monotonic() > deadline:
+            raise RuntimeError("Capture expired while waiting for a fresh camera frame")
+        folder = self.output / f"{capture_id:05d}"
+        folder.mkdir(parents=True, exist_ok=False)
         if on_shutter:
             on_shutter()
-        event = self._receive("captured", timeout=70)
-        files = [Path(value).resolve() for value in event["files"]]
-        expected = self.output / f"{capture_id:05d}"
-        if not files or any(not p.is_relative_to(expected) or not p.is_file() or p.stat().st_size == 0 for p in files):
-            raise RuntimeError("Camera reported a download without a valid photo file")
-        return files
+        path = folder / "frame.jpg"
+        path.write_bytes(event["data"])
+        return [path]
 
     def close(self):
         if self.process is not None:
@@ -156,8 +191,7 @@ class SonyCamera:
                 except (OSError, RuntimeError):
                     pass
                 try:
-                    # Let an in-progress shutter/transfer finish and restore settings.
-                    self.process.wait(timeout=75)
+                    self.process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     self.process.terminate()
                     try:

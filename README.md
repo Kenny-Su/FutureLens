@@ -7,9 +7,9 @@ reaches a summit. You know the photograph you want; you just don't know when it
 will happen.
 
 WaitLess is an AI photography assistant that watches for the moment you describe.
-It checks previews from your camera and requests a full-resolution photograph
-when it recognizes the condition you've agreed on. You choose the composition
-and exposure, then hand over the waiting.
+It checks previews from your camera and saves a photograph when it recognizes
+the condition you've agreed on. You choose the composition, then hand over the
+waiting.
 
 > “What moment should I wait for?”
 
@@ -28,8 +28,9 @@ through photographs taken while nothing was happening.
    or repeated moments, review the session's previews and captures, and stop
    whenever you're done.
 
-Your camera makes the photograph, using the exposure and image format you've
-chosen. WaitLess helps decide when to press the shutter.
+Choose your Mac's built-in camera, an external webcam, or your iPhone through
+Continuity Camera. WaitLess saves still images from the selected camera's video
+stream when the moment arrives.
 
 Some moments you might delegate:
 
@@ -42,6 +43,6 @@ You can also explore the experience with a video. Import a clip, discuss the
 moment you want, and approve the plan. The video advances at normal speed while
 WaitLess watches; each triggered photograph is saved as a frame from the video.
 
-WaitLess is an early prototype for macOS and Sony cameras, designed for scenes
+WaitLess is an early prototype for macOS, designed for scenes
 that unfold over time. The ambition is to give photographers more freedom during
 the wait while keeping the creative decisions in their hands.

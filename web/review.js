@@ -50,6 +50,7 @@ export class IntentReview {
   }
   render(state, connected = true, pending = false) {
     this.connected = connected; this.operation = state.operation; this.pending = pending;
+    this.hasSource = Boolean(state.source.id);
     const draft = state.intent && !["approved", "cancelled"].includes(state.intent.status) ? state.intent : null;
     if (draft?.id !== this.draft?.id) $("intent-feedback").value = "";
     this.draft = draft;
@@ -84,10 +85,10 @@ export class IntentReview {
     $("intent-start").textContent = timing?.start_delay_s ? "Approve and schedule" : "Approve and start";
     $("intent-start").disabled = !active || this.draft.condition_stale ||
       Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
-    $("intent-refine").disabled = locked || (this.draft && !this.draft.preview) || !(message || retry);
+    $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
     $("intent-refine").textContent = !message && retry ? "Retry reply" : "Send ↑";
     $("intent-feedback").disabled = locked;
-    $("intent-refresh").disabled = locked || Boolean(message);
+    $("intent-refresh").disabled = locked || !this.hasSource || Boolean(message);
     $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
     const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;

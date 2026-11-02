@@ -3,16 +3,17 @@ import { drawOverlay, svgNode, annotationTargets, observationText, waitReasonTex
 import { IntentReview } from "./review.js";
 
 const $ = (id) => document.getElementById(id);
-const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", scheduling: "Updating preview interval…", compacting: "Organizing session context…", waiting: "Waiting for the next observation" };
+const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Saving a photo…", scheduling: "Updating preview interval…", compacting: "Organizing session context…", waiting: "Waiting for the next observation" };
 const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
 reasons.video_end = "The video has ended. Your captured frames are saved locally.";
-const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
+const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Saving photo", failed_after_shutter: "Save unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
 captureLabels.skipped_video_end = "Video ended before capture";
 const outcomes = { invalid_assessment: "Capture assessment unavailable · keep checking", invalid_decision: "Capture decision inconsistent · keep checking", invalid_annotations: "Highlights unavailable · keep checking", skipped_intent_uncertain: "Target uncertain · keep checking", skipped_condition_unmet: "Capture condition not met", no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
 const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot", set_preview_interval: "Change preview interval" };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
 let connectionProblemReported = false, lastCheckError = null, lastSessionError = null, lastSourceError = null;
+let cameraListKey = null;
 const rows = new Map();
 const previews = new Map();
 const review = new IntentReview({request: (path, data) => { if (data !== undefined) commandGeneration++; return api(path, data); }, accept, notify: notice,
@@ -39,7 +40,7 @@ function cameraCheckError(check) {
   if (!check) return null;
   if (check.error) return check.error;
   if (!check.capabilities?.capture_ready) {
-    return check.capabilities?.capture_issues?.join(" ") || "The camera is connected but cannot take photographs. Check its shooting settings.";
+    return check.capabilities?.capture_issues?.join(" ") || "The camera cannot provide photos. Reconnect the input and try again.";
   }
   return null;
 }
@@ -122,8 +123,8 @@ function accept(next) {
 }
 
 function renderCameraStatus() {
-  const report = state.report || {};
   const monitoring = state.operation === "monitor";
+  const report = monitoring ? state.report || {} : {};
   const checking = state.operation === "check" || (monitoring && (!report.phase || report.phase === "connecting"));
   const check = state.camera_check;
   const error = check ? cameraCheckError(check) : report.camera_error;
@@ -134,14 +135,29 @@ function renderCameraStatus() {
     : checking ? demo ? "Loading video…" : "Checking camera…" : error ? demo ? "Check video" : "Check camera"
     : ready ? demo ? "Demo video ready" : "Camera connected" : demo ? "Demo video" : "Check camera");
   $("camera-dot").className = `dot ${healthy ? "ready" : error || !connected ? "error" : ""}`;
-  $("check-camera").disabled = pending || !connected || Boolean(state.operation);
+  $("check-camera").disabled = pending || !connected || Boolean(state.operation) || !state.source.id;
   $("check-camera").title = demo ? "Refresh the video reference" : healthy ? "Last connection check succeeded. Click to check again." : "Check camera connection";
   const locked = pending || review.busy || !connected || Boolean(state.operation);
-  $("source-camera").disabled = locked;
+  const picker = $("camera-input"), devices = state.cameras || [];
+  const key = JSON.stringify(devices);
+  if (key !== cameraListKey) {
+    const selected = picker.value || (!demo && state.source.id) || "";
+    picker.replaceChildren(new Option("Choose camera…", ""), ...devices.map(device => new Option(device.name, device.id)));
+    picker.value = devices.some(device => device.id === selected) ? selected : "";
+    cameraListKey = key;
+  }
+  picker.disabled = locked || !devices.length;
+  $("find-cameras").disabled = locked;
+  text("find-cameras", state.operation === "cameras" ? "Finding cameras…" : state.cameras ? "Refresh cameras" : "Find cameras");
+  const selectedReady = !demo && picker.value === state.source.id && ready;
+  $("source-camera").disabled = locked || !picker.value || selectedReady;
   $("source-video").disabled = locked;
-  text("source-camera", demo ? "Use camera" : ready ? "Camera" : "Connect camera");
+  text("source-camera", selectedReady ? "Connected" : "Connect");
   text("source-video", demo ? "Replace video" : "Import video");
-  text("source-detail", demo ? `${state.source.name} · ${clock(state.source.duration_s)} · Normal speed` : "");
+  text("source-detail", demo ? `${state.source.name} · ${clock(state.source.duration_s)} · Normal speed`
+    : state.source.id ? `${state.source.name} · Stream photos`
+    : state.cameras?.length === 0 ? "No cameras found. Connect your camera or iPhone, then refresh."
+    : "Mac cameras and iPhone Continuity Camera");
 }
 
 function element(tag, className, value) {
@@ -256,8 +272,8 @@ function renderAction(row, item) {
     const status = capture.capture_status || event.capture_status;
     label = captureLabels[status] || "Take photograph";
     saved = status === "downloaded";
-    detail = saved ? `${(event.saved_files || capture.saved_files || []).length} original file${(event.saved_files || capture.saved_files || []).length === 1 ? "" : "s"} downloaded`
-      : status === "shutter_sent" ? "Shutter sent · awaiting download"
+    detail = saved ? `${(event.saved_files || capture.saved_files || []).length} photo file${(event.saved_files || capture.saved_files || []).length === 1 ? "" : "s"} saved`
+      : status === "shutter_sent" ? "Saving captured photo"
       : status?.startsWith("failed") || event.status === "failed" ? "Capture unconfirmed · no automatic retry"
       : status?.startsWith("skipped") ? "No shutter command was sent" : "Preparing the camera";
     row.dataset.status = saved ? "completed" : capture.status || event.status;
@@ -411,7 +427,9 @@ function render() {
 }
 
 $("show-highlights").addEventListener("change", () => render());
-$("source-camera").addEventListener("click", () => command(state.source.mode === "video" ? "/api/source" : "/api/check", state.source.mode === "video" ? {mode: "camera"} : {}));
+$("find-cameras").addEventListener("click", () => command("/api/cameras"));
+$("camera-input").addEventListener("change", renderCameraStatus);
+$("source-camera").addEventListener("click", () => command("/api/source", {mode: "camera", device_id: $("camera-input").value}));
 $("source-video").addEventListener("click", () => $("demo-file").click());
 $("demo-file").addEventListener("change", async event => {
   const file = event.target.files[0];

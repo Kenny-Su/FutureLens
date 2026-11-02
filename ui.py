@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 import webbrowser
 from PIL import Image
 
-from camera import SonyCamera, DEFAULT_HELPER
+from camera import MacCamera, list_cameras
 from demo import DemoVideo, VideoCamera
 from waitless import SessionSettings, run_session, write_json
 from model import load_config, validate_config, model_image, review_intent
@@ -32,10 +32,10 @@ def session_settings(data):
 
 
 class SessionManager:
-    """One owner of the camera. UI requests never touch an active SDK session."""
+    """One owner of the camera. UI requests never touch an active capture session."""
 
-    def __init__(self, output_root=ROOT / "outputs", helper=DEFAULT_HELPER):
-        self.output_root, self.helper = Path(output_root), Path(helper)
+    def __init__(self, output_root=ROOT / "outputs"):
+        self.output_root = Path(output_root)
         self.lock = threading.Lock()
         self.worker = None
         self.operation = None
@@ -50,6 +50,8 @@ class SessionManager:
         self.preview_camera = None
         self.preview_context = ExitStack()
         self.demo_video = None
+        self.cameras = None
+        self.selected_camera = None
         self.source_error = None
         self.token = secrets.token_urlsafe(32)
 
@@ -75,8 +77,7 @@ class SessionManager:
             settings = session_settings({"request": draft["request"],
                 **{key: data[key] for key in ("interval_s", "start_delay_s") if key in data}})
             validate_config(load_config())
-            if self.demo_video is None and not self.helper.is_file():
-                raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
+            self._require_source()
             approved = ApprovedIntent.create(draft, self.intent_output / "reference.jpg",
                                              datetime.now(timezone.utc).isoformat())
             self._save_intent({**draft, "status": "approved", "approved_at": approved.data["approved_at"]})
@@ -88,9 +89,9 @@ class SessionManager:
     def _monitor(self, settings, approved):
         try:
             self._close_preview()
-            source = {"video": self.demo_video} if self.demo_video else {}
+            source = {"video": self.demo_video} if self.demo_video else {"camera_id": self.selected_camera["id"]}
             run_session(settings, self.output, approved_intent=approved,
-                        camera_helper=self.helper, stop_event=self.stop_event, **source)
+                        stop_event=self.stop_event, **source)
         except Exception as exc:
             with self.lock:
                 self.error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
@@ -115,11 +116,10 @@ class SessionManager:
     def prepare_intent(self, data):
         config = load_config()
         validate_config(config)
-        if self.demo_video is None and not self.helper.is_file():
-            raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
         with self.lock:
             if self.operation is not None:
                 raise ValueError("Wait for the current camera operation to finish.")
+            self._require_source()
             previous = None
             if isinstance(data, dict) and set(data) == {"intent_id", "revision"}:
                 previous = self._draft(data)
@@ -180,7 +180,7 @@ class SessionManager:
                 raise ValueError("Only a pending review can be cancelled.")
             self.intent_generation += 1
             self._save_intent({**draft, "status": "cancelled", "revision": draft["revision"] + 1})
-            # An in-flight SDK/API call finishes before another operation can own the camera.
+            # An in-flight camera/API call finishes before another operation can own the camera.
 
     def _interpret(self, generation, draft, config, *, fresh=False):
         folder = self.intent_output
@@ -226,7 +226,7 @@ class SessionManager:
         try:
             if self.preview_camera is None:
                 device = (VideoCamera(self.demo_video, folder / "moments") if self.demo_video else
-                          SonyCamera(folder / "moments", helper=self.helper, enable_capture=False))
+                          MacCamera(folder / "moments", device_id=self.selected_camera["id"]))
                 self.preview_camera = self.preview_context.enter_context(device)
             camera = self.preview_camera
             return camera.latest_frame(), camera.model, deepcopy(camera.capabilities)
@@ -239,7 +239,30 @@ class SessionManager:
         self.preview_context.close()
 
     def source(self):
-        return self.demo_video.metadata() if self.demo_video else {"mode": "camera", "id": "camera"}
+        return self.demo_video.metadata() if self.demo_video else {"mode": "camera", **(self.selected_camera or {"id": None})}
+
+    def _require_source(self):
+        if self.demo_video is None and self.selected_camera is None:
+            raise ValueError("Find cameras and choose an input, or import a video first.")
+
+    def discover_cameras(self):
+        with self.lock:
+            if self.operation is not None:
+                raise ValueError("Wait for the current operation before refreshing cameras.")
+            self.source_error = None
+            self._launch("cameras", self._discover_cameras)
+
+    def _discover_cameras(self):
+        try:
+            devices = list_cameras()
+            with self.lock:
+                self.cameras = devices
+        except Exception as exc:
+            with self.lock:
+                self.source_error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
+        finally:
+            with self.lock:
+                self.operation = None
 
     def import_video(self, path, name):
         with self.lock:
@@ -265,12 +288,16 @@ class SessionManager:
                 self.source_error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
                 self.operation = None
 
-    def use_camera(self):
+    def use_camera(self, device_id):
         with self.lock:
             if self.operation is not None:
                 raise ValueError("Stop the current operation before changing the source.")
+            device = next((camera for camera in self.cameras or [] if camera["id"] == device_id), None)
+            if device is None:
+                raise ValueError("Refresh the camera list and choose an available input.")
             self._close_preview()
             self.demo_video = None
+            self.selected_camera = deepcopy(device)
             self.source_error = None
             self.intent_generation += 1
             self.intent = self.intent_output = None
@@ -282,6 +309,7 @@ class SessionManager:
         with self.lock:
             if self.operation is not None:
                 raise ValueError("Wait for the current camera operation to finish.")
+            self._require_source()
             self.camera_check = None
             self.check_output = self._folder("camera-check")
             self._launch("check", self._check)
@@ -329,7 +357,7 @@ class SessionManager:
                     "session_id": self.output.name if self.output else None,
                     "output": str(self.output) if self.output else None,
                     "report": self._report(), "error": self.error, "camera_check": self.camera_check,
-                    "source": self.source(), "source_error": self.source_error,
+                    "source": self.source(), "source_error": self.source_error, "cameras": deepcopy(self.cameras),
                     "intent": deepcopy(self.intent)}
 
     def media_file(self, session, name):
@@ -396,7 +424,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _file(self, path, download=False):
-        # Stream original camera files; a RAW download need not fit in memory.
+        # Stream saved photos, including files from older sessions.
         with path.open("rb") as source:
             mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             name = "".join(c for c in path.name if c.isascii() and (c.isalnum() or c in ".-_")) or "photo"
@@ -443,10 +471,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.manager.stop()
             elif self.path == "/api/check":
                 self.server.manager.check_camera()
+            elif self.path == "/api/cameras":
+                if data != {}:
+                    raise ValueError("Invalid camera list request.")
+                self.server.manager.discover_cameras()
             elif self.path == "/api/source":
-                if data != {"mode": "camera"}:
-                    raise ValueError("Import a video or choose the camera source.")
-                self.server.manager.use_camera()
+                if (not isinstance(data, dict) or set(data) != {"mode", "device_id"}
+                        or data["mode"] != "camera" or not isinstance(data["device_id"], str)):
+                    raise ValueError("Choose a camera input.")
+                self.server.manager.use_camera(data["device_id"])
             elif self.path == "/api/intent/prepare":
                 self.server.manager.prepare_intent(data)
             elif self.path == "/api/intent/refine":
