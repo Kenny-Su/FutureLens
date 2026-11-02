@@ -5,13 +5,12 @@ import { IntentReview } from "./review.js";
 const $ = (id) => document.getElementById(id);
 const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", thinking: "Evaluating the scene…", capturing: "Taking a photo…", waiting: "Waiting for the next observation" };
 const reasons = {
-  capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.",
   user_stop: "You stopped this session. All saved previews and photos are preserved.",
   video_end: "The video has ended. Your captured frames are saved locally.",
   camera_disconnected: "iPhone disconnected. Reconnect it and review the scene to start again.",
 };
 const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Processing photo", failed_after_shutter: "Save unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_expired_before_shutter: "Capture expired", skipped_user_stop: "Session stopped", skipped_video_end: "Video ended before capture", skipped_condition_unmet: "Capture condition not met" };
-const outcomes = { no_photo: "No photo", stale_preview: "Preview expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Observation failed", ...captureLabels };
+const outcomes = { no_photo: "No photo", stale_preview: "Preview expired", user_stop: "Session stopped", error: "Observation failed", ...captureLabels };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
 let connectionProblemReported = false, lastCheckError = null, lastSessionError = null, lastSourceError = null;
@@ -48,8 +47,7 @@ function cameraCheckError(check) {
 
 function sessionError(next) {
   const report = next.report || {};
-  return next.error || (report.status === "failed" ? report.camera_error || `Session stopped (${report.error_type || "error"}). Check the saved logs.`
-    : report.status === "capacity_reached" ? reasons.capacity_reached : null);
+  return next.error || (report.status === "failed" ? report.camera_error || `Session stopped (${report.error_type || "error"}). Check the saved logs.` : null);
 }
 
 function loadPreview(image, url) {

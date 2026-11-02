@@ -52,10 +52,18 @@
           </form>
         </section>
       </div>
-      <div id="review-footer" class="review-footer">
-        <button id="intent-start" class="button primary" type="button" disabled>Approve and start</button>
-      </div>
     </section>
+
+    <dialog id="plan-dialog" aria-labelledby="plan-title" aria-describedby="plan-description">
+      <h2 id="plan-title">Your shooting plan</h2>
+      <p id="plan-description" class="muted">Review what WaitLess will look for before you begin.</p>
+      <p id="plan-condition"></p>
+      <p id="plan-timing" class="muted small"></p>
+      <div class="plan-actions">
+        <button id="plan-edit" class="button secondary" type="button" autofocus>Request edits</button>
+        <button id="intent-start" class="button primary" type="button" disabled>Confirm and start</button>
+      </div>
+    </dialog>
 
     <section id="monitor" aria-labelledby="monitor-title" hidden>
       <div class="monitor-header">

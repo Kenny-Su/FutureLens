@@ -17,7 +17,8 @@ from PIL import Image
 from camera import MacCamera, list_cameras
 from demo import DemoVideo, VideoCamera
 from waitless import SessionSettings, run_session, write_json
-from model import load_config, validate_config, model_image, review_intent
+from openai_client import load_config, validate_config, model_image
+from planner import review_intent
 from intent import ApprovedIntent, validate_review
 
 ROOT = Path(__file__).resolve().parent
@@ -70,7 +71,8 @@ class SessionManager:
                 raise ValueError("A camera operation is already running.")
             draft = self._draft(data)
             if (set(data) - {"intent_id", "revision", "interval_s", "start_delay_s"} or draft["status"] != "ready"
-                    or draft.get("condition_stale") or draft.get("question") or draft.get("pending_message_id")):
+                    or draft.get("plan_ready") is not True or draft.get("condition_stale")
+                    or draft.get("question") or draft.get("pending_message_id")):
                 raise ValueError("Review the current interpretation before starting.")
             output = self._folder("session")
             settings = session_settings({"request": draft["request"],
@@ -141,7 +143,7 @@ class SessionManager:
             draft = {"id": self.intent_output.name, "revision": 1, "request": settings.request,
                      "source": self.source(),
                      "status": "preparing", "condition": "", "targets": [], "error": None,
-                     "preview": None, "condition_stale": True, "question": "",
+                     "preview": None, "condition_stale": True, "question": "", "plan_ready": False,
                      "conversation": conversation, "pending_message_id": message["id"],
                      "previous_interpretation": {k: previous[k] for k in ("condition", "targets", "question")} if previous else None}
             self._save_intent(draft)
@@ -164,7 +166,7 @@ class SessionManager:
             self.intent_generation += 1
             generation = self.intent_generation
             draft = {**draft, "revision": draft["revision"] + 1, "status": "refining", "error": None,
-                     "condition_stale": True}
+                     "condition_stale": True, "plan_ready": False}
             if not retry:
                 message = self._message("user", feedback, reference_id=draft["id"])
                 draft["conversation"] = [*draft["conversation"], message]
@@ -200,14 +202,14 @@ class SessionManager:
                 previous = ({k: draft[k] for k in ("condition", "targets", "question")}
                             if draft["condition"] else draft.get("previous_interpretation"))
                 reply = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
-                                      previous=deepcopy(previous), reference_changed=not bool(draft["condition"]))
+                                      previous=deepcopy(previous), reference_changed=fresh)
             # Validate model output before replacing the current interpretation.
             reply = validate_review(reply)
             plan = {k: reply[k] for k in ("condition", "targets")}
-            draft.update(plan, question=reply["question"], status="ready", revision=draft["revision"] + 1,
+            draft.update(plan, plan_ready=reply["plan_ready"], question=reply["question"], status="ready", revision=draft["revision"] + 1,
                          error=None, condition_stale=False, pending_message_id=None)
             draft["conversation"].append(self._message("assistant", reply["reply"], condition=reply["condition"],
-                                                       question=reply["question"], targets=deepcopy(reply["targets"]),
+                                                       question=reply["question"], plan_ready=reply["plan_ready"], targets=deepcopy(reply["targets"]),
                                                        reference_id=draft["id"], revision=draft["revision"]))
         except Exception as exc:
             draft.update(status="ready" if draft["condition"] else "failed",

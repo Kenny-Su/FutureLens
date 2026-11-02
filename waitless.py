@@ -13,10 +13,10 @@ from camera import MacCamera, CameraError
 from demo import VideoCamera, VideoEnded
 from history import PreviewArchive, ObservationJournal, capture_outcome
 from intent import ApprovedIntent
-from model import (API_ENDPOINT, MONITORING_SYSTEM_PROMPT, MODEL, MAX_IMAGES, MAX_REQUEST_BYTES,
-                   ApiError, CapacityReached, call_model, check_capacity, make_monitoring_payload,
-                   load_config, response_usage, decision_probability, text_content,
-                   validate_config, PLANNING_MODEL, model_image)
+from openai_client import (ApiError, load_config, response_usage, text_content, validate_config, model_image)
+from planner import PLANNING_MODEL
+from monitor import (DECISIONS_ENDPOINT, MONITOR_MODEL, MONITOR_QUESTION_INSTRUCTIONS,
+                     make_monitoring_payload, evaluate_preview, decision_probability)
 
 
 # Provisional product threshold; calibrate with representative previews later.
@@ -137,8 +137,6 @@ class Monitor:
                 text_content({"condition": self.intent["condition"], "frame_id": preview.id,
                               "intent_revision": self.intent["revision"]}),
                 {"type": "image", "file": str(preview.path.relative_to(self.output))}]})
-            metrics = check_capacity(payload)
-            entry.update(metrics)
             outcome = self.expired(preview)
             if outcome:
                 return
@@ -148,12 +146,12 @@ class Monitor:
             if outcome:
                 return
             active = True
-            journal.event("model", "started", "model:1", turn=1, **metrics)
+            journal.event("model", "started", "model:1", turn=1)
             self.report["api_requests"] += 1
             entry["model_calls"] += 1
             entry["run_status"] = "evaluating"
             before = time.monotonic()
-            response = call_model(payload, self.config, timeout=90)
+            response = evaluate_preview(payload, self.config, timeout=90)
             probability = decision_probability(response)
             condition = "met" if probability >= CAPTURE_PROBABILITY_THRESHOLD else "unmet"
             journal.message({"role": "assistant", "content": [text_content(response)]})
@@ -171,9 +169,6 @@ class Monitor:
             else:
                 self.shoot(preview, entry, journal, f"frame:{preview.id}")
                 outcome = entry["capture_status"]
-        except CapacityReached as exc:
-            outcome = "capacity_reached"
-            self.report.update(status="capacity_reached", stop_reason="capacity_reached", capacity=exc.details)
         except BaseException:
             outcome = "error"
             entry["run_status"] = "failed"
@@ -240,8 +235,6 @@ class Monitor:
                         entry.update(run_status="failed", outcome="error")
                     raise
                 check_stop(self.stop_event)
-                if self.report["status"] == "capacity_reached":
-                    break
                 if video and self.camera.remaining_seconds <= 0:
                     self.report.update(status="completed", stop_reason="video_end")
                     break
@@ -276,18 +269,17 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     report = {
         "status": "running", "phase": "scheduled" if settings.start_delay_s else "connecting",
         "scheduled_start_at": scheduled_start_at, "mode": "demo_video" if video else "continuity_camera",
-        "provider": "openai", "model": MODEL,
+        "provider": "openai", "model": MONITOR_MODEL,
         "intent": approved_intent.data,
         "model_settings": {"api": "decisions", "question_type": "predicate",
                            "capture_probability_threshold": CAPTURE_PROBABILITY_THRESHOLD,
                            "planning_model": PLANNING_MODEL},
-        "api_host": urlsplit(API_ENDPOINT).hostname,
-        "instructions": MONITORING_SYSTEM_PROMPT, "request": settings.request,
+        "api_host": urlsplit(DECISIONS_ENDPOINT).hostname,
+        "instructions": MONITOR_QUESTION_INSTRUCTIONS, "request": settings.request,
         "source": f"video:{video.name}" if video else "continuity:iphone", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
                      ("max_frame_age", "interval_s", "start_delay_s")},
         "current_interval_s": settings.interval_s,
-        "capacity_limits": {"images": MAX_IMAGES, "request_bytes": MAX_REQUEST_BYTES},
         "observations": [], "previews_saved": 0, "photos_taken": 0,
         "api_requests": 0,
     }

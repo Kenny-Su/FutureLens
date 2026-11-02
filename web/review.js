@@ -6,6 +6,7 @@ export class IntentReview {
     Object.assign(this, {request, accept, notify, started, cancelled});
     this.draft = null; this.busy = false;
     this.messageNodes = new Map();
+    this.dialogPlan = null;
     try {
       const saved = JSON.parse(localStorage.getItem("waitless.schedule"));
       if (saved) {
@@ -29,10 +30,17 @@ export class IntentReview {
       }
     });
     $("review-composer").addEventListener("submit", event => { event.preventDefault(); this.send(); });
+    $("plan-edit").addEventListener("click", () => {
+      $("plan-dialog").close();
+      $("intent-feedback").placeholder = "What would you like to change about the plan?";
+      $("intent-feedback").focus();
+    });
     $("intent-start").addEventListener("click", async () => {
-      if ($("intent-start").disabled) return;
+      if ($("intent-start").disabled || !$("plan-dialog").open || this.dialogPlan !== this.planKey()) return;
       const timing = this.schedule();
-      if (timing && await this.perform("/api/start", {...this.identity(), ...timing})) this.started();
+      if (timing && await this.perform("/api/start", {...this.identity(), ...timing})) {
+        $("plan-dialog").close(); this.started();
+      }
     });
     $("intent-feedback").addEventListener("input", () => this.controls());
     $("intent-feedback").addEventListener("keydown", event => {
@@ -82,8 +90,8 @@ export class IntentReview {
     const timing = this.schedule();
     $("start-delay").disabled = locked;
     $("check-interval").disabled = locked;
-    $("intent-start").textContent = timing?.start_delay_s ? "Approve and schedule" : "Approve and start";
-    $("intent-start").disabled = !active || !this.hasSource || this.draft.condition_stale ||
+    $("intent-start").textContent = timing?.start_delay_s ? "Confirm and schedule" : "Confirm and start";
+    $("intent-start").disabled = !active || !this.hasSource || !this.draft.plan_ready || this.draft.condition_stale ||
       Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
     $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
     $("intent-refine").textContent = !message && retry ? "Retry reply" : "Send ↑";
@@ -92,6 +100,31 @@ export class IntentReview {
     $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
     const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;
+    const ready = Boolean(this.draft?.plan_ready && !this.draft.condition_stale && !this.draft.question && !this.draft.pending_message_id);
+    this.canReviewPlan = ready && active && !message && this.hasSource;
+    for (const button of $("review-messages").querySelectorAll(".review-plan-button")) {
+      const current = button.dataset.planKey === this.planKey();
+      button.disabled = !current || !this.canReviewPlan;
+      button.textContent = current ? "Review shooting plan" : "Previous plan";
+      button.closest(".plan-ready-notice").querySelector("p").textContent = current && ready
+        ? "Your shooting plan is ready, waiting for your approval."
+        : "This plan has been superseded by the conversation below.";
+    }
+    $("plan-edit").disabled = locked;
+    if ($("plan-dialog").open && (!ready || this.dialogPlan !== this.planKey() || !this.connected || !this.hasSource)) {
+      $("plan-dialog").close();
+    }
+  }
+  planKey() { return this.draft ? `${this.draft.id}:${this.draft.revision}` : null; }
+  openPlan() {
+    if (!this.canReviewPlan) return;
+    this.dialogPlan = this.planKey();
+    $("plan-condition").textContent = this.draft.condition;
+    const timing = this.schedule();
+    $("plan-timing").textContent = timing
+      ? `${timing.start_delay_s ? `Start in ${timing.start_delay_s / 60} minutes` : "Start now"} · Check every ${timing.interval_s} seconds. Qualifying photos will be saved for your review.`
+      : "Set a valid start time and preview interval before confirming.";
+    if (!$("plan-dialog").open) $("plan-dialog").showModal();
   }
   conversation() {
     const log = $("review-messages"), turns = this.draft?.conversation || [];
@@ -109,6 +142,19 @@ export class IntentReview {
       if (turn.question) {
         const question = document.createElement("p"); question.className = "message-question";
         question.textContent = turn.question; article.append(question);
+      }
+      if (turn.role === "assistant" && turn.plan_ready) {
+        const notice = document.createElement("div"); notice.className = "plan-ready-notice";
+        const description = document.createElement("p");
+        description.textContent = "Your shooting plan is ready, waiting for your approval.";
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "button secondary review-plan-button";
+        button.dataset.planKey = `${turn.reference_id}:${turn.revision}`;
+        button.textContent = "Review shooting plan";
+        button.addEventListener("click", () => {
+          if (button.dataset.planKey === this.planKey()) this.openPlan();
+        });
+        notice.append(description, button); article.append(notice);
       }
       log.append(article); this.messageNodes.set(turn.id, article); added = true;
     }
