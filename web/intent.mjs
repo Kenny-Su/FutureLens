@@ -51,9 +51,6 @@ export function annotationTargets(entry, intent) {
   const byId = new Map(intent.targets.map(t => [t.id, t]));
   return entry.annotations.targets.filter(t => byId.has(t.id)).map(t => ({...byId.get(t.id), ...t}));
 }
-export function waitReasonText(entry) {
-  return {already_captured: "Requested moment already photographed", cooldown: "Waiting for capture cooldown"}[entry.wait_reason] || "";
-}
 export function observationText(entry, intent) {
   if (!intent) return "";
   const current = entry.assessment_status !== undefined;
@@ -63,8 +60,8 @@ export function observationText(entry, intent) {
     return current ? (status === "pending" ? "Evaluating the capture condition…" : "Capture assessment unavailable for this preview")
       : (status === "pending" ? "Locating approved targets…" : "Highlights unavailable for this preview");
   }
-  const states = {met: "Capture condition met", unmet: "Waiting for the capture condition", uncertain: "Condition uncertain · keep checking"};
-  let decision = waitReasonText(entry);
+  const states = {met: "Capture condition met", unmet: "Waiting for the capture condition"};
+  let decision = "";
   if (entry.capture_status === "downloaded") decision = "Photo saved";
   else if (entry.capture_status === "requested") decision = "Photo requested";
   else if (entry.capture_status === "shutter_sent") decision = "Shutter sent · awaiting photo";

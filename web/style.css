@@ -369,15 +369,9 @@ textarea::placeholder {
 .action-card { max-width:700px; padding:12px 16px; border:1px solid var(--border); border-radius:10px; background:var(--panel); }
 .kind-model .action-card { border-color:transparent; background:transparent; }
 .kind-model .activity-label { color:var(--muted); }
-.kind-compaction .action-card { background:#191d1b66; }
 .thread-item.success .action-card { border-color:#6f8d5c; }
 .thread-item.success .activity-label { color:var(--accent); }
 .activity-detail { margin-top:4px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
-.history-images { display:grid; grid-template-columns:repeat(auto-fit,minmax(100px,140px)); gap:10px; margin-top:12px; }
-.history-image { min-width:0; }
-.history-image button { display:block; width:100%; border:0; padding:0; background:none; color:var(--accent); }
-.history-image img { display:block; width:100%; aspect-ratio:3/2; object-fit:contain; background:#101411; border-radius:4px; }
-.history-image .history-link { font-size:10px; padding:6px 0; text-align:left; }
 .download-links { display:flex; flex-wrap:wrap; gap:8px 14px; font-size:12px; color:var(--accent); overflow-wrap:anywhere; }
 .download-links:empty { display:none; }
 .action-card>.download-links { margin-top:10px; }

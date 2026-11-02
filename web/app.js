@@ -1,16 +1,17 @@
 import { sessionActivity } from "./activity.mjs";
-import { drawOverlay, svgNode, annotationTargets, observationText, waitReasonText } from "./intent.mjs";
+import { drawOverlay, svgNode, annotationTargets, observationText } from "./intent.mjs";
 import { IntentReview } from "./review.js";
 
 const $ = (id) => document.getElementById(id);
-const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking a photo…", scheduling: "Updating preview interval…", compacting: "Organizing session context…", waiting: "Waiting for the next observation" };
-const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
-reasons.video_end = "The video has ended. Your captured frames are saved locally.";
-reasons.camera_disconnected = "iPhone disconnected. Reconnect it and review the scene to start again.";
-const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Processing photo", failed_after_shutter: "Save unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
-captureLabels.skipped_video_end = "Video ended before capture";
-const outcomes = { invalid_assessment: "Capture assessment unavailable · keep checking", invalid_decision: "Capture decision inconsistent · keep checking", invalid_annotations: "Highlights unavailable · keep checking", skipped_intent_uncertain: "Target uncertain · keep checking", skipped_condition_unmet: "Capture condition not met", no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
-const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot", set_preview_interval: "Change preview interval" };
+const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", thinking: "Evaluating the scene…", capturing: "Taking a photo…", waiting: "Waiting for the next observation" };
+const reasons = {
+  capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.",
+  user_stop: "You stopped this session. All saved previews and photos are preserved.",
+  video_end: "The video has ended. Your captured frames are saved locally.",
+  camera_disconnected: "iPhone disconnected. Reconnect it and review the scene to start again.",
+};
+const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Processing photo", failed_after_shutter: "Save unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_expired_before_shutter: "Capture expired", skipped_user_stop: "Session stopped", skipped_video_end: "Video ended before capture", skipped_condition_unmet: "Capture condition not met" };
+const outcomes = { no_photo: "No photo", stale_preview: "Preview expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Observation failed", ...captureLabels };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
 let connectionProblemReported = false, lastCheckError = null, lastSessionError = null, lastSourceError = null;
@@ -162,15 +163,6 @@ function element(tag, className, value) {
 function captured(entry) { return entry.capture_status === "downloaded" && entry.saved_files?.length > 0; }
 function entries() { return state.report?.observations || []; }
 function browsing() { following = false; show("go-latest", true); }
-function focusObservation(id) {
-  const row = previews.get(id);
-  if (!row) return;
-  browsing();
-  for (const preview of previews.values()) preview.classList.toggle("focused", preview === row);
-  const timeline = $("timeline");
-  timeline.scrollTop += row.getBoundingClientRect().top - timeline.getBoundingClientRect().top - 8;
-  row.querySelector(".preview-button").focus({ preventScroll: true });
-}
 function downloads(container, entry) {
   const key = captured(entry) ? entry.saved_files.join("|") : "";
   if (container.dataset.key === key) return;
@@ -241,39 +233,22 @@ function renderAction(row, item) {
   row.dataset.status = event.status;
   let label, detail = "", saved = false;
   if (item.kind === "model") {
-    label = event.decision_error ? "Capture decision needs correction"
-      : item.noPhoto ? waitReasonText(item.entry) || "Keep watching" : event.status === "completed" ? "Scene evaluated" : "Evaluate scene";
-    detail = event.status === "checking" ? "Preparing to evaluate the latest preview"
-      : event.status === "started" ? "Evaluating the scene…"
+    label = item.noPhoto ? "Keep watching" : event.status === "completed" ? "Scene evaluated" : "Evaluate scene";
+    detail = event.status === "started" ? "Evaluating the scene…"
       : event.status === "completed" ? (item.noPhoto ? "No photograph requested · " : "") + `${event.latency_s.toFixed(1)} sec`
       : event.status === "failed" ? "Evaluation failed · session ended" : outcomes[event.reason] || "Evaluation skipped";
-  } else if (item.kind === "compaction") {
-    label = "Organize session context";
-    detail = event.status === "checking" ? "Preparing earlier observations for a summary"
-      : event.status === "started" ? "Preparing summary before the next preview"
-      : event.status === "completed" ? `Context updated · ${event.latency_s.toFixed(1)} sec`
-      : event.status === "failed" ? "Summary unavailable · keeping history and continuing observations" : "Skipped";
-  } else if (item.kind === "tool" && event.name !== "shoot") {
-    const unchanged = event.name === "set_preview_interval" && event.changed === false;
-    label = unchanged ? "Preview interval unchanged" : toolLabels[event.name] || "Tool";
-    detail = event.error ? `Tool error · ${event.error}` : event.status === "started" ? "In progress"
-      : event.status === "failed" ? "Tool failed" : event.name === "list_history" ? `${event.count} preview${event.count === 1 ? "" : "s"}${event.next_cursor !== null ? " · more available" : ""}`
-      : event.name === "get_history" ? `${event.frame_ids.length} image${event.frame_ids.length === 1 ? "" : "s"}`
-      : event.name === "set_preview_interval" ? (unchanged ? `Keeping ${event.seconds} sec · monitoring continues` : `${event.previous_seconds} → ${event.seconds} sec`) : "Finished";
-  } else if (item.kind === "capture" || event.name === "shoot") {
-    const capture = item.capture || event;
-    const status = capture.capture_status || event.capture_status;
+  } else if (item.kind === "capture") {
+    const status = event.capture_status;
     label = captureLabels[status] || "Take photograph";
     saved = status === "downloaded";
-    detail = saved ? `${(event.saved_files || capture.saved_files || []).length} photo file${(event.saved_files || capture.saved_files || []).length === 1 ? "" : "s"} saved`
+    detail = saved ? `${(event.saved_files || []).length} photo file${(event.saved_files || []).length === 1 ? "" : "s"} saved`
       : status === "shutter_sent" ? "Saving captured photo"
       : status?.startsWith("failed") || event.status === "failed" ? "Capture unconfirmed · no automatic retry"
       : status?.startsWith("skipped") ? "No shutter command was sent" : "Preparing the camera";
-    row.dataset.status = saved ? "completed" : capture.status || event.status;
+    row.dataset.status = saved ? "completed" : event.status;
   } else {
     label = outcomes[event.outcome] || "Observation ended";
-    detail = event.outcome === "run_limit" ? "Evaluation limit reached · continuing with the next preview"
-      : event.outcome === "stale_preview" ? "Waiting for a fresh preview" : "";
+    detail = event.outcome === "stale_preview" ? "Waiting for a fresh preview" : "";
   }
   row.classList.toggle("success", saved);
   const surface = element("div", "action-card");
@@ -283,30 +258,6 @@ function renderAction(row, item) {
     const links = element("div", "download-links");
     downloads(links, item.entry);
     surface.append(links);
-  }
-  if (item.kind === "tool" && event.frame_ids) {
-    const thumbnails = element("div", "history-images");
-    for (const id of event.frame_ids) {
-      const source = entries().find(entry => entry.frame_id === id);
-      if (!source) continue;
-      const imageItem = element("div", "history-image");
-      const button = element("button");
-      button.type = "button";
-      button.setAttribute("aria-label", `Enlarge retrieved observation ${id + 1}`);
-      const image = element("img");
-      image.alt = `Retrieved observation ${id + 1}`;
-      image.loading = "lazy";
-      loadPreview(image, media(source.preview_file));
-      button.append(image);
-      button.addEventListener("click", () => openImage(id));
-      const link = element("button", "history-link", `Preview ${String(id + 1).padStart(2, "0")} · ${clock(source.timestamp_s)} ↗`);
-      link.type = "button";
-      link.setAttribute("aria-label", `Go to observation ${id + 1}`);
-      link.addEventListener("click", () => focusObservation(id));
-      imageItem.append(button, link);
-      thumbnails.append(imageItem);
-    }
-    surface.append(thumbnails);
   }
   row.append(surface);
 }
@@ -368,7 +319,7 @@ function renderMonitor() {
   text("preview-count", entries.length);
   text("shot-count", report.photos_taken || 0);
   text("call-count", report.api_requests || 0);
-  $("call-count").title = `${report.compaction_requests || 0} context summary calls included · ${report.compactions_completed || 0} completed`;
+  $("call-count").title = "One scene evaluation per preview";
   text("session-detail", failed ? ""
     : stopping ? "Waiting for an active operation to finish. A capture already sent to the camera may still complete."
     : scheduled ? `Starts at ${new Date(report.scheduled_start_at * 1000).toLocaleString()}` : active ? ""

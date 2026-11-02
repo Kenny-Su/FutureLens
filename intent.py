@@ -1,4 +1,4 @@
-"""Reviewed photography intent and frame-bound capture assessments."""
+"""Reviewed photography plans and immutable user approval."""
 
 from dataclasses import dataclass
 import json
@@ -23,33 +23,6 @@ REVIEW_SCHEMA = object_schema({
     "question": {"type": "string", "description": "Clarification question, or an empty string when none is needed."},
     "targets": {"type": "array", "items": TARGET_SCHEMA},
 })
-SNAPSHOT_SCHEMA = object_schema({
-    "frame_id": {"type": "integer"}, "intent_revision": {"type": "integer"},
-    "condition": {"type": "string", "enum": ["met", "unmet", "uncertain"]},
-})
-WAIT_REASON_SCHEMA = {"type": "string", "enum": [
-    "condition_unmet", "condition_uncertain", "already_captured", "cooldown",
-]}
-WAIT_SCHEMA = object_schema({"action": {"type": "string", "enum": ["wait"]},
-                             "snapshot": SNAPSHOT_SCHEMA, "wait_reason": WAIT_REASON_SCHEMA})
-
-
-def validate_wait_reason(reason, condition, *, photos_taken, cooldown_remaining_s):
-    """A non-capture decision needs a reason consistent with observable session facts.
-
-    The agent still decides which requested occurrence/quantity has been captured;
-    a positive photo count alone never implies that a repeating request is finished.
-    """
-    if reason not in WAIT_REASON_SCHEMA["enum"]:
-        raise ValueError("Supply a valid wait_reason for a decision without a photograph.")
-    if reason in ("condition_unmet", "condition_uncertain"):
-        if condition != reason.removeprefix("condition_"):
-            raise ValueError("The wait_reason contradicts the reported capture condition.")
-    elif reason == "already_captured" and photos_taken <= 0:
-        raise ValueError("No photograph has been downloaded; already_captured is not supported.")
-    elif reason == "cooldown" and cooldown_remaining_s <= 0:
-        raise ValueError("No capture cooldown is active.")
-    return reason
 
 
 def text(value, label, limit):
@@ -90,17 +63,6 @@ def validate_intent(value, width=1, height=1):
     return {"condition": condition, "targets": result}
 
 
-def validate_snapshot(value, intent, frame_id):
-    if not isinstance(value, dict) or set(value) != {"frame_id", "intent_revision", "condition"}:
-        raise ValueError("Supply the current frame, intent revision, and capture condition assessment.")
-    if (type(value["frame_id"]) is not int or value["frame_id"] != frame_id
-            or type(value["intent_revision"]) is not int or value["intent_revision"] != intent["revision"]):
-        raise ValueError("The assessment belongs to a different frame or intent revision.")
-    if value["condition"] not in ("met", "unmet", "uncertain"):
-        raise ValueError("Invalid capture condition assessment.")
-    return dict(value)
-
-
 def validate_review(value, *, width=1, height=1):
     fields = {"condition", "reply", "question", "targets"}
     if not isinstance(value, dict) or set(value) != fields:
@@ -115,14 +77,15 @@ def validate_review(value, *, width=1, height=1):
 
 
 def json_response(response):
-    if not isinstance(response, dict) or response.get("stop_reason") != "end_turn":
+    """Read the completed structured planning reply from the Responses API."""
+    if not isinstance(response, dict) or response.get("status") != "completed":
         raise ValueError("The interpretation was incomplete. Try again.")
-    blocks = response.get("content")
-    if not isinstance(blocks, list) or any(not isinstance(b, dict) or b.get("type") not in
-                                         ("text", "thinking", "redacted_thinking") for b in blocks):
-        raise ValueError("Invalid interpretation response.")
     try:
-        return json.loads("".join(b["text"] for b in blocks if b["type"] == "text"))
+        blocks = [block for item in response["output"] if item["type"] == "message"
+                  for block in item["content"]]
+        if not blocks or any(block.get("type") != "output_text" for block in blocks):
+            raise ValueError("Refused or missing interpretation")
+        return json.loads("".join(block["text"] for block in blocks))
     except (KeyError, TypeError, ValueError):
         raise ValueError("The interpretation was not valid JSON. Try again.") from None
 

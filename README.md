@@ -24,9 +24,8 @@ through photographs taken while nothing was happening.
    Start now, or set something like “in 20 minutes, check every 10 seconds.”
    Your chosen interval stays fixed throughout the session.
 3. **Let WaitLess watch.** Once you approve, it checks the scene on your schedule
-   and requests a photo when the agreed condition is met. Ask for one photograph
-   or repeated moments, review the session's previews and captures, and stop
-   whenever you're done.
+   and saves photos when the agreed condition is met. Let the qualifying moments
+   collect for you to review, then choose your favorites. Stop whenever you're done.
 
 Use your iPhone through Continuity Camera on your Mac. WaitLess watches previews
 and requests high-quality still photos with Apple's photo processing when your
@@ -34,7 +33,7 @@ moment arrives. Keep your iPhone connected and your Mac awake while it watches.
 
 Some moments you might delegate:
 
-- “Take one photo when the mountain summit is clearly visible through the clouds.”
+- “Take photos when the mountain summit is clearly visible through the clouds.”
 - “Photograph the village when the fog has lifted enough to reveal it.”
 - “Capture the mountain when warm sunrise light reaches its summit.”
 - “Take a photo when someone sits on the empty bench.”
