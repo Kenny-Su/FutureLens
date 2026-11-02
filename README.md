@@ -97,7 +97,10 @@ reliably recognizing each change still needs field testing.
 WaitLess is an early tool for **macOS and one Sony camera connected over USB**,
 controlled through a local browser interface. The camera runtime is included for
 Apple silicon and Intel Macs; normal setup needs no SDK download or native build.
-You'll need Python 3.11+ and an Anthropic API key. Sampled previews are sent to
+You can also **import a video in demo mode** to try the full review and monitoring
+flow without a camera. Playback runs at normal speed; triggered photos are saved
+as video frames, and the session ends with the video.
+You'll need Python 3.12+ and an Anthropic API key. Sampled previews are sent to
 Claude for evaluation; preview copies and downloaded photographs are stored locally.
 
 It is best suited to scenes that change slowly enough for a preview to be evaluated

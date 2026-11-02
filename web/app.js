@@ -5,12 +5,14 @@ import { IntentReview } from "./review.js";
 const $ = (id) => document.getElementById(id);
 const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", checking: "Checking request capacity…", thinking: "Evaluating the scene…", retrieving: "Looking up visual history…", capturing: "Taking and downloading a photo…", scheduling: "Updating preview interval…", compacting: "Organizing session context…", waiting: "Waiting for the next observation" };
 const reasons = { duration: "Monitoring duration reached.", max_shots: "Photo limit reached.", max_requests: "Maximum AI calls reached.", capacity_reached: "Request capacity reached. All previews and run transcripts are preserved.", user_stop: "You stopped this session. All saved previews and photos are preserved." };
+reasons.video_end = "The video has ended. Your captured frames are saved locally.";
 const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Downloading photo", failed_after_shutter: "Download unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_duration_expired: "Session expired", skipped_expired_before_shutter: "Capture expired", skipped_cooldown: "Capture cooldown", skipped_photo_limit: "Photo limit reached", skipped_user_stop: "Session stopped" };
+captureLabels.skipped_video_end = "Video ended before capture";
 const outcomes = { invalid_assessment: "Capture assessment unavailable · keep checking", invalid_decision: "Capture decision inconsistent · keep checking", invalid_annotations: "Highlights unavailable · keep checking", skipped_intent_uncertain: "Target uncertain · keep checking", skipped_condition_unmet: "Capture condition not met", no_photo: "No photo", preview_interval_set: "Preview interval set", run_limit: "Run limit reached", session_budget: "Maximum AI calls reached", stale_preview: "Preview expired", duration: "Session expired", capacity_reached: "Capacity reached", user_stop: "Session stopped", error: "Run failed", ...captureLabels };
 const toolLabels = { list_history: "List history", get_history: "Retrieve images", shoot: "Shoot", set_preview_interval: "Change preview interval" };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null;
-let checkedOnLoad = false, connectionProblemReported = false, lastCheckError = null, lastSessionError = null;
+let connectionProblemReported = false, lastCheckError = null, lastSessionError = null, lastSourceError = null;
 const rows = new Map();
 const previews = new Map();
 const review = new IntentReview({request: (path, data) => { if (data !== undefined) commandGeneration++; return api(path, data); }, accept, notify: notice,
@@ -61,8 +63,11 @@ function loadPreview(image, url) {
 }
 
 async function api(path, data) {
+  const upload = data instanceof File;
   const response = await fetch(path, data === undefined ? { cache: "no-store" } : {
-    method: "POST", headers: { "Content-Type": "application/json", "X-WaitLess-Token": state.token }, body: JSON.stringify(data),
+    method: "POST", headers: { "Content-Type": upload ? "application/octet-stream" : "application/json",
+      "X-WaitLess-Token": state.token, ...(upload ? {"X-Video-Name": encodeURIComponent(data.name)} : {}) },
+    body: upload ? data : JSON.stringify(data),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "The request could not be completed.");
@@ -112,6 +117,8 @@ function accept(next) {
   const key = error ? `${sessionId}:${error}` : null;
   if (key && key !== lastSessionError) notice(error);
   lastSessionError = key;
+  if (state.source_error && state.source_error !== lastSourceError) notice(state.source_error);
+  lastSourceError = state.source_error;
 }
 
 function renderCameraStatus() {
@@ -122,10 +129,19 @@ function renderCameraStatus() {
   const error = check ? cameraCheckError(check) : report.camera_error;
   const ready = !error && (check ? check.capabilities?.capture_ready : report.status !== "failed" && report.camera_capabilities?.capture_ready);
   const healthy = connected && !checking && ready;
-  text("camera-status", !connected ? "Connection lost" : checking ? "Checking camera…" : error ? "Check camera" : ready ? "Camera connected" : "Check camera");
+  const demo = state.source.mode === "video";
+  text("camera-status", !connected ? "Connection lost" : state.operation === "import" ? "Importing video…"
+    : checking ? demo ? "Loading video…" : "Checking camera…" : error ? demo ? "Check video" : "Check camera"
+    : ready ? demo ? "Demo video ready" : "Camera connected" : demo ? "Demo video" : "Check camera");
   $("camera-dot").className = `dot ${healthy ? "ready" : error || !connected ? "error" : ""}`;
   $("check-camera").disabled = pending || !connected || Boolean(state.operation);
-  $("check-camera").title = healthy ? "Last connection check succeeded. Click to check again." : "Check camera connection";
+  $("check-camera").title = demo ? "Refresh the video reference" : healthy ? "Last connection check succeeded. Click to check again." : "Check camera connection";
+  const locked = pending || review.busy || !connected || Boolean(state.operation);
+  $("source-camera").disabled = locked;
+  $("source-video").disabled = locked;
+  text("source-camera", demo ? "Use camera" : ready ? "Camera" : "Connect camera");
+  text("source-video", demo ? "Replace video" : "Import video");
+  text("source-detail", demo ? `${state.source.name} · ${clock(state.source.duration_s)} · Normal speed` : "");
 }
 
 function element(tag, className, value) {
@@ -323,11 +339,12 @@ function renderTimeline(observations) {
 
 function renderMonitor() {
   const report = state.report || {};
+  const demo = report.mode === "demo_video" || (!report.mode && state.source.mode === "video");
   const entries = report.observations || [];
   const active = state.operation === "monitor";
   const failed = Boolean(sessionError(state));
   const stopping = state.stopping;
-  text("monitor-title", active ? "Monitoring" : failed ? "Session ended" : report.status === "stopped" ? "Session stopped" : "Session complete");
+  text("monitor-title", active ? demo ? "Demo monitoring" : "Monitoring" : failed ? "Session ended" : report.status === "stopped" ? "Session stopped" : "Session complete");
   text("status-text", !connected ? "Reconnecting" : stopping ? "Stopping safely" : failed ? "Needs attention" : active ? (report.phase === "connecting" || !report.phase ? "Connecting" : "Monitoring") : report.status === "stopped" ? "Stopped" : "Finished");
   $("session-status").className = `status-pill ${failed ? "error" : active ? "busy" : ""}`;
   show("stop", active);
@@ -336,7 +353,8 @@ function renderMonitor() {
   text("active-instruction", report.intent?.condition ||
     (state.intent?.status === "approved" ? state.intent.condition : "") || report.request || state.intent?.request || "");
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
-  text("active-camera", report.camera_model || (active ? "Connecting…" : "Not connected"));
+  text("active-camera", report.camera_model || (active ? demo ? "Opening video…" : "Connecting…" : "Not connected"));
+  text("timeline-empty", demo ? "The first video preview will appear here when monitoring begins." : "The first preview will appear here after the camera connects.");
   text("preview-count", entries.length);
   text("shot-count", report.photos_taken || 0);
   text("call-count", report.api_requests || 0);
@@ -353,12 +371,14 @@ function renderMonitor() {
 function updateClock() {
   if (!state || !showingMonitor) return;
   const report = state.report || {};
+  const demo = report.mode === "demo_video" || (!report.mode && state.source.mode === "video");
   const active = state.operation === "monitor";
   const start = Date.parse(report.monitoring_started_at);
   const end = Date.parse(report.ended_at);
   const elapsed = Number.isFinite(start) ? Math.max(0, ((Number.isFinite(end) ? end : Date.now()) - start) / 1000) : 0;
   text("elapsed", clock(elapsed));
-  let next = !connected ? "Connection lost · retrying…" : state.stopping ? "Finishing the current operation…" : !active ? "Session finished" : phases[report.phase] || phases.connecting;
+  let next = !connected ? "Connection lost · retrying…" : state.stopping ? "Finishing the current operation…" : !active ? "Session finished"
+    : demo && (!report.phase || report.phase === "connecting") ? "Opening video…" : phases[report.phase] || phases.connecting;
   if (connected && active && !state.stopping && report.phase === "waiting" && report.next_observation_at) {
     const remaining = Math.max(0, report.next_observation_at - Date.now() / 1000);
     next = `Next observation in ${clock(Math.ceil(remaining))}`;
@@ -387,6 +407,16 @@ function render() {
 }
 
 $("show-highlights").addEventListener("change", () => render());
+$("source-camera").addEventListener("click", () => command(state.source.mode === "video" ? "/api/source" : "/api/check", state.source.mode === "video" ? {mode: "camera"} : {}));
+$("source-video").addEventListener("click", () => $("demo-file").click());
+$("demo-file").addEventListener("change", async event => {
+  const file = event.target.files[0];
+  if (file) {
+    if (file.size > 2 * 1024 ** 3) notice("Choose a video file up to 2 GB.");
+    else await command("/api/demo", file);
+  }
+  event.target.value = "";
+});
 $("check-camera").addEventListener("click", () => command("/api/check"));
 $("stop").addEventListener("click", () => command("/api/stop"));
 $("new-session").addEventListener("click", () => {
@@ -420,10 +450,6 @@ async function poll() {
     // Do not let an older polling response replace a just-completed command.
     if (!pending && !review.busy && generation === commandGeneration) {
       accept(next);
-      if (!checkedOnLoad) {
-        checkedOnLoad = true;
-        if (!next.operation && !next.session_id && !next.intent) await command("/api/check");
-      }
     }
   } catch {
     connected = false;

@@ -14,6 +14,7 @@ from model import ApiConfig
 from test_camera import Clock, FakeCamera
 from test_model import answer
 from test_intent import draft, plan, review_reply, bind_snapshot
+from test_demo import make_video
 from ui import LocalServer, SessionManager, session_settings
 
 
@@ -34,6 +35,58 @@ class InterfaceTests(unittest.TestCase):
         self.manager.intent_output = self.root / "review"
         self.manager._save_intent(draft(self.manager.intent_output, request))
         return {"intent_id": "review", "revision": 1}
+
+    def test_video_import_review_and_approval_do_not_require_camera_runtime(self):
+        self.helper.unlink()
+        folder = self.root / "demo"
+        folder.mkdir()
+        path = folder / "source.video"
+        make_video(path)
+        with patch("ui.SonyCamera") as sony, patch("ui.review_intent", return_value=review_reply()), patch("ui.run_session") as run:
+            self.manager.import_video(path, "Demo.mp4")
+            self.manager.worker.join(3)
+            self.assertIsNone(self.manager.source_error)
+            self.assertEqual(self.manager.state()["source"]["mode"], "video")
+            self.assertTrue((folder / "preview.jpg").exists())
+            self.manager.prepare_intent({"request": "scene"})
+            self.manager.worker.join(3)
+            current = self.manager.intent
+            self.assertEqual(current["status"], "ready")
+            identity = {"intent_id": current["id"], "revision": current["revision"]}
+            self.manager.start(identity)
+            self.manager.worker.join(3)
+            sony.assert_not_called()
+            self.assertEqual(run.call_args.kwargs["video"].path, path)
+            self.assertEqual(run.call_args.kwargs["approved_intent"].data["source"]["mode"], "video")
+        with patch("ui.SonyCamera", side_effect=RuntimeError("No camera")):
+            self.manager.use_camera()
+            self.manager.worker.join(3)
+        self.assertIsNone(self.manager.intent)
+        self.assertEqual(self.manager.state()["source"]["mode"], "camera")
+        with self.assertRaises(ValueError):
+            self.manager.start(identity)
+
+    def test_failed_video_import_preserves_the_existing_review(self):
+        self.start_data()
+        current = self.manager.state()["intent"]
+        path = self.root / "invalid.video"
+        path.write_bytes(b"invalid video")
+        self.manager.import_video(path, "bad.mp4")
+        self.manager.worker.join(3)
+        self.assertEqual(self.manager.intent, current)
+        self.assertEqual(self.manager.source()["mode"], "camera")
+        self.assertIn("Could not read", self.manager.source_error)
+        self.assertFalse(path.exists())
+
+    def test_source_changes_are_rejected_while_an_operation_owns_the_camera(self):
+        self.manager.operation = "monitor"
+        try:
+            with self.assertRaises(ValueError):
+                self.manager.import_video(self.root / "source.video", "demo.mp4")
+            with self.assertRaises(ValueError):
+                self.manager.use_camera()
+        finally:
+            self.manager.operation = None
 
     def test_settings_validate_before_camera_or_api_work(self):
         settings = session_settings({"request": "scene"})
@@ -417,6 +470,7 @@ class HttpTests(unittest.TestCase):
         self.server.shutdown()
         self.thread.join()
         self.server.server_close()
+        self.manager.close()
 
     def request(self, method, path, body=None, headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
@@ -439,6 +493,24 @@ class HttpTests(unittest.TestCase):
         state = json.loads(self.request("GET", "/api/state")[2])
         self.assertEqual(state["token"], self.manager.token)
         self.assertNotIn("api_key", state)
+
+    def test_video_upload_requires_token_and_serves_only_its_preview(self):
+        path = self.root / "fixture.mp4"
+        make_video(path)
+        data = path.read_bytes()
+        headers = {"Content-Type": "application/octet-stream", "X-Video-Name": "demo.mp4"}
+        self.assertEqual(self.request("POST", "/api/demo", data, headers)[0], 403)
+        headers["X-WaitLess-Token"] = self.manager.token
+        with patch("ui.SonyCamera") as sony:
+            self.assertEqual(self.request("POST", "/api/demo", data, headers)[0], 202)
+            self.manager.worker.join(3)
+            sony.assert_not_called()
+        state = self.manager.state()
+        self.assertEqual(state["source"]["name"], "demo.mp4")
+        self.assertEqual(self.request("GET", state["camera_check"]["preview"])[0], 200)
+        self.assertEqual(self.request("GET", f"/media/{state['source']['id']}/source.video")[0], 404)
+        self.assertEqual(self.request("POST", "/api/demo", b"", headers)[0], 400)
+        self.assertEqual(self.request("POST", "/api/demo", b"x", {**headers, "Content-Length": str(2 * 1024**3 + 1)})[0], 400)
 
     def test_untrusted_hosts_origins_and_missing_tokens_cannot_control_camera(self):
         for headers in ({"Host": "attacker.example"}, {"Origin": "https://attacker.example"},

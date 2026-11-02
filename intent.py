@@ -143,6 +143,8 @@ class ApprovedIntent:
                 raise ValueError("The reference image dimensions have changed. Review again.")
         data = {key: draft[key] for key in ("id", "revision", "request", "width", "height", "reference_at")}
         data.update(plan, approved_at=approved_at, reference_file="intent-reference.jpg")
+        if "source" in draft:
+            data["source"] = draft["source"]
         return cls(json.dumps(data, allow_nan=False), Path(reference_path))
 
     @property

@@ -15,12 +15,14 @@ import webbrowser
 from PIL import Image
 
 from camera import SonyCamera, DEFAULT_HELPER
+from demo import DemoVideo, VideoCamera
 from waitless import SessionSettings, run_session, write_json
 from model import load_config, validate_config, model_image, review_intent
 from intent import ApprovedIntent, validate_review
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "web"
+MAX_VIDEO_BYTES = 2 * 1024**3
 
 
 def session_settings(data):
@@ -47,6 +49,8 @@ class SessionManager:
         self.intent_generation = 0
         self.preview_camera = None
         self.preview_context = ExitStack()
+        self.demo_video = None
+        self.source_error = None
         self.token = secrets.token_urlsafe(32)
 
     def _folder(self, prefix):
@@ -70,7 +74,7 @@ class SessionManager:
             output = self._folder("session")
             settings = session_settings({"request": draft["request"]})
             validate_config(load_config())
-            if not self.helper.is_file():
+            if self.demo_video is None and not self.helper.is_file():
                 raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
             approved = ApprovedIntent.create(draft, self.intent_output / "reference.jpg",
                                              datetime.now(timezone.utc).isoformat())
@@ -83,8 +87,9 @@ class SessionManager:
     def _monitor(self, settings, approved):
         try:
             self._close_preview()
+            source = {"video": self.demo_video} if self.demo_video else {}
             run_session(settings, self.output, approved_intent=approved,
-                        camera_helper=self.helper, stop_event=self.stop_event)
+                        camera_helper=self.helper, stop_event=self.stop_event, **source)
         except Exception as exc:
             with self.lock:
                 self.error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
@@ -109,7 +114,7 @@ class SessionManager:
     def prepare_intent(self, data):
         config = load_config()
         validate_config(config)
-        if not self.helper.is_file():
+        if self.demo_video is None and not self.helper.is_file():
             raise ValueError("The bundled camera runtime is missing. Restore runtime/sony from the repository.")
         with self.lock:
             if self.operation is not None:
@@ -132,6 +137,7 @@ class SessionManager:
                                     kind="refresh" if previous else "message", reference_id=self.intent_output.name)
             conversation.append(message)
             draft = {"id": self.intent_output.name, "revision": 1, "request": settings.request,
+                     "source": self.source(),
                      "status": "preparing", "condition": "", "targets": [], "error": None,
                      "preview": None, "condition_stale": True, "question": "",
                      "conversation": conversation, "pending_message_id": message["id"],
@@ -216,8 +222,9 @@ class SessionManager:
         # Camera operations share one worker; retain the connection, not a frame queue.
         try:
             if self.preview_camera is None:
-                self.preview_camera = self.preview_context.enter_context(
-                    SonyCamera(folder / "moments", helper=self.helper, enable_capture=False))
+                device = (VideoCamera(self.demo_video, folder / "moments") if self.demo_video else
+                          SonyCamera(folder / "moments", helper=self.helper, enable_capture=False))
+                self.preview_camera = self.preview_context.enter_context(device)
             camera = self.preview_camera
             return camera.latest_frame(), camera.model, deepcopy(camera.capabilities)
         except Exception:
@@ -227,6 +234,46 @@ class SessionManager:
     def _close_preview(self):
         self.preview_camera = None
         self.preview_context.close()
+
+    def source(self):
+        return self.demo_video.metadata() if self.demo_video else {"mode": "camera", "id": "camera"}
+
+    def import_video(self, path, name):
+        with self.lock:
+            if self.operation is not None:
+                raise ValueError("Wait for the current operation to finish before importing a video.")
+            self.source_error = None
+            self._launch("import", lambda: self._import_video(path, name))
+
+    def _import_video(self, path, name):
+        try:
+            video = DemoVideo.inspect(path, name)
+            self._close_preview()
+            with self.lock:
+                self.demo_video = video
+                self.intent_generation += 1
+                self.intent = self.intent_output = None
+                self.camera_check = None
+                self.check_output = path.parent
+            self._check()
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            with self.lock:
+                self.source_error = str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__
+                self.operation = None
+
+    def use_camera(self):
+        with self.lock:
+            if self.operation is not None:
+                raise ValueError("Stop the current operation before changing the source.")
+            self._close_preview()
+            self.demo_video = None
+            self.source_error = None
+            self.intent_generation += 1
+            self.intent = self.intent_output = None
+            self.camera_check = None
+            self.check_output = self._folder("camera-check")
+            self._launch("check", self._check)
 
     def check_camera(self):
         with self.lock:
@@ -239,7 +286,7 @@ class SessionManager:
     def _check(self):
         result = {}
         try:
-            self.check_output.mkdir(parents=True)
+            self.check_output.mkdir(parents=True, exist_ok=True)
             frame, model, capabilities = self._preview_frame(self.check_output)
             result.update(model=model, capabilities=capabilities)
             frame.image.save(self.check_output / "preview.jpg", quality=95)
@@ -279,6 +326,7 @@ class SessionManager:
                     "session_id": self.output.name if self.output else None,
                     "output": str(self.output) if self.output else None,
                     "report": self._report(), "error": self.error, "camera_check": self.camera_check,
+                    "source": self.source(), "source_error": self.source_error,
                     "intent": deepcopy(self.intent)}
 
     def media_file(self, session, name):
@@ -380,6 +428,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if self.path == "/api/demo":
+                self._import_video(length)
+                return
             if not 0 < length <= 131_072 or self.headers.get_content_type() != "application/json":
                 raise ValueError("Expected a small JSON request.")
             data = json.loads(self.rfile.read(length))
@@ -389,6 +440,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.manager.stop()
             elif self.path == "/api/check":
                 self.server.manager.check_camera()
+            elif self.path == "/api/source":
+                if data != {"mode": "camera"}:
+                    raise ValueError("Import a video or choose the camera source.")
+                self.server.manager.use_camera()
             elif self.path == "/api/intent/prepare":
                 self.server.manager.prepare_intent(data)
             elif self.path == "/api/intent/refine":
@@ -401,6 +456,37 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.server.manager.state(), 202)
         except (ValueError, UnicodeDecodeError) as exc:
             self._json({"error": str(exc)}, 400)
+
+    def _import_video(self, length):
+        if not 0 < length <= MAX_VIDEO_BYTES or self.headers.get_content_type() != "application/octet-stream":
+            raise ValueError("Choose a video file up to 2 GB.")
+        name = unquote(self.headers.get("X-Video-Name", "video"))
+        name = name.replace("\\", "/").split("/")[-1]
+        if not name.strip() or len(name) > 255 or any(ord(c) < 32 for c in name):
+            raise ValueError("Invalid video filename.")
+        manager = self.server.manager
+        with manager.lock:
+            if manager.operation is not None:
+                raise ValueError("Wait for the current operation to finish before importing a video.")
+        folder = manager._folder("demo")
+        folder.mkdir(parents=True)
+        path = folder / "source.video"
+        try:
+            self.connection.settimeout(30)
+            with path.open("xb") as target:
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("The video upload was interrupted.")
+                    target.write(chunk)
+                    remaining -= len(chunk)
+            manager.import_video(path, name)
+        except (OSError, ValueError):
+            path.unlink(missing_ok=True)
+            folder.rmdir()
+            raise ValueError("Could not import the video. Wait for any active operation and try again.") from None
+        self._json(manager.state(), 202)
 
 
 def main():

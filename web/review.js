@@ -33,14 +33,16 @@ export class IntentReview {
     this.draft = draft;
     const reference = draft?.preview ? draft : state.camera_check?.preview ? state.camera_check : state.intent;
     const preview = reference?.preview;
+    const demo = state.source.mode === "video";
     const refreshing = state.operation === "check" || draft?.status === "preparing";
     $("intent-error").textContent = !connected ? "Connection lost. Reconnecting…" : draft?.error || "";
     $("intent-image").hidden = !preview;
     $("intent-preview-empty").hidden = Boolean(preview);
-    $("intent-preview-empty").textContent = refreshing ? "Connecting to camera…" : "Connect your camera and refresh the preview.";
+    $("intent-preview-empty").textContent = state.operation === "import" ? "Importing video…" : refreshing
+      ? demo ? "Loading video preview…" : "Connecting to camera…" : "Connect a camera or import a video.";
     if (preview && $("intent-image").getAttribute("src") !== preview) $("intent-image").src = preview;
     $("intent-reference-time").textContent = refreshing ? "Refreshing preview…" : reference?.reference_at
-      ? `Reference captured ${new Date(reference.reference_at).toLocaleTimeString()}` : preview ? "Camera preview" : "";
+      ? `Reference captured ${new Date(reference.reference_at).toLocaleTimeString()}` : preview ? demo ? "Video reference · 00:00" : "Camera preview" : "";
     if (draft?.width && draft.height) {
       drawOverlay($("intent-overlay"), draft.targets, draft.width, draft.height);
       $("intent-overlay").setAttribute("aria-label", `AI highlights: ${draft.targets.map(t => t.label).join(", ")}`);

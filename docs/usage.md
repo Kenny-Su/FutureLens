@@ -54,14 +54,15 @@ The repository includes a prebuilt camera helper and Sony's runtime libraries in
 The runtime is about 30 MB and uses ordinary Git files, so Git LFS is not required.
 SDK headers are needed only by maintainers changing native code.
 
-Use Python 3.11+ in a project virtual environment:
+Use Python 3.12+ in a project virtual environment:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-Dependencies stay in `.venv`. Configure the project `.env`:
+Dependencies stay in `.venv`. PyAV provides local video decoding with bundled
+FFmpeg libraries; no separate FFmpeg installation is needed. Configure the project `.env`:
 
 ```dotenv
 ANTHROPIC_API_KEY=your-key
@@ -137,7 +138,8 @@ are controlled in the browser.
    whether to capture once or repeat photographs when the condition occurs again.
    Monitoring continues until you press **Stop session**. The header shows elapsed
    time and cumulative preview, photograph, and AI-call counts.
-2. Opening the page checks the camera once and displays its preview. The header shows **Camera connected**
+2. Choose **Connect camera** or **Import video** beside the preview. Opening the
+   page does not connect to hardware. The header shows **Camera connected**
    after a successful check; click it (or **Check camera**) to check again.
    This does not call Claude, enable capture, or take a photo. The status reflects
    the last check, not continuous USB detection. Monitoring checks the connection again.
@@ -163,7 +165,7 @@ are controlled in the browser.
    The conversation survives browser refreshes. The preview-only camera connection
    stays open during review, so a refresh fetches a new still frame without reconnecting.
    There is no live feed or background frame sampling. The connection closes before
-   monitoring takes ownership, on a preview error, or when the server exits.
+   monitoring takes ownership, on a preview error, when changing sources, or when the server exits.
    **Start over** clears the current discussion so you can describe a different moment.
    **Approve and start** commits the displayed interpretation and begins monitoring
    from a fresh frame. Approval is mandatory for every session. The boxes align the
@@ -207,6 +209,30 @@ or extra Python dependency. The server binds only to loopback, checks request or
 and a per-server control token, and serves only recorded previews and confirmed
 photo files. API credentials remain in Python; they are never sent to the browser.
 The interface itself loads no external fonts, scripts, or analytics.
+
+## Demo mode with a video
+
+Choose **Import video** on the alignment page. MP4/MOV, WebM/MKV, and AVI movies up
+to 2 GB are supported. The file is copied into `outputs/demo-…/source.video` and
+decoded locally. Demo mode does not open the Sony camera or require its runtime.
+The Anthropic API is still used for review and observations, using sampled images.
+
+The reference is the video's first frame and stays still throughout alignment.
+After **Approve and start**, playback begins at the start and advances at normal
+speed, including while the model is evaluating a preview. A shutter request saves
+the video frame at that time as a full-resolution JPEG under the session's
+`moments/` folder. The report records video positions for previews and captures.
+
+Sampling follows the same automatic timing as the camera: 60 seconds initially,
+adjustable by the agent between 10 and 300 seconds. Use a long enough clip for the
+moments you want to test; brief events between sampled previews can be missed.
+The session finishes when the video ends, or when you stop it. A reply arriving
+after the end cannot save another frame. **New session** starts the video over.
+
+**Replace video** and **Use camera** select another source and clear the current
+review; source changes are blocked during monitoring. The selected video survives
+browser refreshes. After a server restart, import it again. Imported videos remain
+local artifacts; only their still previews and captured JPEGs are served by the UI.
 
 ## The observation loop
 

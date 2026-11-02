@@ -10,6 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from camera import SonyCamera, CameraError, DEFAULT_HELPER
+from demo import VideoCamera, VideoEnded
 from agent import (SessionAgent, COMPACT_INPUT_TOKENS, COMPACT_REQUEST_BYTES, COMPACT_IMAGES,
                    KEEP_OBSERVATIONS, COMPACTION_RETRY_SECONDS)
 from history import Preview, PreviewArchive, AgentJournal, capture_outcome, append_json
@@ -106,15 +107,20 @@ class Monitor:
             else:
                 try:
                     files = self.camera.capture(entry["capture_id"], on_shutter=on_shutter, max_delay=remaining)
+                except VideoEnded:
+                    entry["capture_status"] = "skipped_video_end"
                 except (RuntimeError, OSError, KeyboardInterrupt):
                     entry["capture_status"] = ("failed_after_shutter" if entry["capture_status"] == "shutter_sent"
                                                else "failed_or_unconfirmed")
                     journal.event("capture", "failed", call_id + ":capture", **capture_outcome(entry))
                     raise
-                entry.update(capture_status="downloaded", saved_files=[str(p.relative_to(self.output)) for p in files])
-                self.report["photos_taken"] += 1
-                self.last_capture = time.monotonic()
-                self.archive.record_capture(entry["capture_id"], preview, files)
+                else:
+                    entry.update(capture_status="downloaded", saved_files=[str(p.relative_to(self.output)) for p in files])
+                    if isinstance(self.camera, VideoCamera):
+                        entry["video_capture_position_s"] = self.camera.last_capture_position
+                    self.report["photos_taken"] += 1
+                    self.last_capture = time.monotonic()
+                    self.archive.record_capture(entry["capture_id"], preview, files)
         journal.event("capture", "completed" if entry["capture_status"] == "downloaded" else "skipped",
                       call_id + ":capture", **capture_outcome(entry))
         return capture_outcome(entry)
@@ -425,9 +431,12 @@ class Monitor:
         self.report["context_revision"] = self.agent.revision
         event("completed", context_revision=self.agent.revision, usage=response_usage(response))
 
-    def run(self, camera_helper):
-        with SonyCamera(self.output / "moments", enable_capture=True, helper=camera_helper) as self.camera:
-            self.report.update(camera_model=self.camera.model, source=f"sony:usb:{self.camera.model}",
+    def run(self, camera_helper, video=None):
+        source = (VideoCamera(video, self.output / "moments", enable_capture=True) if video else
+                  SonyCamera(self.output / "moments", enable_capture=True, helper=camera_helper))
+        with source as self.camera:
+            self.report.update(camera_model=self.camera.model,
+                               source=f"video:{video.name}" if video else f"sony:usb:{self.camera.model}",
                                camera_capabilities=self.camera.capabilities,
                                monitoring_started_at=datetime.now(timezone.utc).isoformat())
             self.publish()
@@ -440,17 +449,28 @@ class Monitor:
                 now = time.monotonic()
                 if now < next_sample:
                     delay = next_sample - now
+                    if video:
+                        delay = min(delay, self.camera.remaining_seconds)
                     if self.stop_event is None:
                         time.sleep(delay)
                     else:
                         self.stop_event.wait(delay)
                 check_stop(self.stop_event)
+                if video and self.camera.remaining_seconds <= 0:
+                    self.report.update(status="completed", stop_reason="video_end")
+                    break
                 self.report.update(phase="observing", next_observation_at=None)
                 self.publish()
-                preview = self.archive.append(self.camera.latest_frame())
+                try:
+                    preview = self.archive.append(self.camera.latest_frame())
+                except VideoEnded:
+                    self.report.update(status="completed", stop_reason="video_end")
+                    break
                 entry = {**preview.metadata(), "preview_file": str(preview.path.relative_to(self.output)),
                          "model_calls": 0, "run_status": "saved", "capture_status": "not_requested",
                          "next_preview_interval_s": self.report["current_interval_s"]}
+                if video:
+                    entry["video_position_s"] = self.camera.last_frame_position
                 self.report["observations"].append(entry)
                 self.report["previews_saved"] = self.archive.count
                 self.publish()
@@ -464,6 +484,9 @@ class Monitor:
                 check_stop(self.stop_event)
                 if self.report["status"] == "capacity_reached":
                     break
+                if video and self.camera.remaining_seconds <= 0:
+                    self.report.update(status="completed", stop_reason="video_end")
+                    break
                 try:
                     self.compact_between_observations(preview, entry)
                 except CapacityReached as exc:
@@ -471,6 +494,8 @@ class Monitor:
                     break
                 check_stop(self.stop_event)
                 next_sample = max(time.monotonic(), preview.received_at + entry["next_preview_interval_s"])
+                if video:
+                    next_sample = min(next_sample, self.camera.started + video.duration)
                 self.report.update(phase="waiting", next_observation_at=time.time() + max(0, next_sample - time.monotonic()))
                 self.publish()
         self.publish()
@@ -478,7 +503,7 @@ class Monitor:
 
 
 def run_session(settings: SessionSettings, output: Path, *, approved_intent: ApprovedIntent,
-                camera_helper=DEFAULT_HELPER, stop_event=None) -> Path:
+                camera_helper=DEFAULT_HELPER, stop_event=None, video=None) -> Path:
     if not isinstance(approved_intent, ApprovedIntent) or approved_intent.data["request"] != settings.request:
         raise ValueError("A matching approved intent is required before monitoring.")
     config = load_config()
@@ -489,7 +514,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     shutil.copyfile(approved_intent.reference_path, output / "intent-reference.jpg")
     write_json(output / "intent.json", approved_intent.data)
     report = {
-        "status": "running", "phase": "connecting", "mode": "sony_usb",
+        "status": "running", "phase": "connecting", "mode": "demo_video" if video else "sony_usb",
         "provider": "anthropic", "model": MODEL,
         "intent": approved_intent.data,
         "model_settings": {"effort": EFFORT, "thinking": THINKING["type"],
@@ -497,7 +522,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
                            "automatic_prompt_caching": True},
         "api_host": urlsplit(API_ENDPOINT).hostname,
         "instructions": INSTRUCTIONS, "request": settings.request,
-        "source": "sony:usb", "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": f"video:{video.name}" if video else "sony:usb", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
                      ("cooldown", "max_frame_age")},
         "auto_interval_bounds_s": {"min": AUTO_MIN_INTERVAL, "max": AUTO_MAX_INTERVAL, "initial": AUTO_INITIAL_INTERVAL},
@@ -513,10 +538,12 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
                                 "images": COMPACT_IMAGES, "keep_observations": KEEP_OBSERVATIONS,
                                 "retry_after_s": COMPACTION_RETRY_SECONDS},
     }
+    if video:
+        report["video"] = video.metadata()
     write_json(output / "results.json", report)
     try:
         check_stop(stop_event)
-        return Monitor(settings, config, output, report, stop_event).run(camera_helper)
+        return Monitor(settings, config, output, report, stop_event).run(camera_helper, video)
     except SessionStopped:
         report.update(status="stopped", stop_reason="user_stop")
         return output
