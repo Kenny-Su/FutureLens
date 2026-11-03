@@ -1,4 +1,4 @@
-// Read-only reference highlights and historical observation annotations.
+// Plan reference display.
 export const colors = ["#c2dfac", "#8fd6ef", "#e7bc82", "#d6b5f5", "#f5aebc", "#8ee1c6"];
 export function targetColor(id) {
   let hash = 0;
@@ -45,37 +45,6 @@ export function drawOverlay(svg, targets, width, height) {
   }
   svg.append(...labels);
 }
-export function annotationTargets(entry, intent) {
-  // Historical reports can contain sampled localizations. New observations only
-  // assess the condition; never project their reference boxes onto a current frame.
-  if (entry.assessment_status !== undefined || !intent || !Array.isArray(entry.annotations?.targets) || entry.annotations_status !== "available" ||
-      entry.annotations.frame_id !== entry.frame_id || entry.annotations.intent_revision !== intent.revision) return [];
-  const byId = new Map(intent.targets.map(t => [t.id, t]));
-  return entry.annotations.targets.filter(t => byId.has(t.id)).map(t => ({...byId.get(t.id), ...t}));
-}
-export function observationText(entry, intent) {
-  if (!intent) return "";
-  const current = entry.assessment_status !== undefined;
-  const status = current ? entry.assessment_status : entry.annotations_status;
-  const snapshot = current ? entry.assessment : entry.annotations;
-  if (status !== "available" || !snapshot || snapshot.frame_id !== entry.frame_id || snapshot.intent_revision !== intent.revision) {
-    return current ? (status === "pending" ? "Evaluating the capture condition…" : "Capture assessment unavailable for this preview")
-      : (status === "pending" ? "Locating approved targets…" : "Highlights unavailable for this preview");
-  }
-  const states = {met: "Capture condition met", unmet: "Waiting for the capture condition"};
-  let decision = "";
-  if (entry.capture_status === "downloaded") decision = "Photo saved";
-  else if (entry.capture_status === "requested") decision = "Photo requested";
-  else if (entry.capture_status === "shutter_sent") decision = "Shutter sent · awaiting photo";
-  else if (!decision && snapshot.condition === "met") {
-    decision = entry.capture_status?.startsWith("skipped_") ? "Photo skipped"
-      : entry.capture_status?.startsWith("failed_") ? "Capture failed or unconfirmed"
-      : entry.outcome ? "No photo requested" : "Capture decision pending";
-  }
-  const missing = annotationTargets(entry, intent).filter(t => t.status !== "visible").map(t => `${t.label}: ${t.status}`);
-  return [states[snapshot.condition], decision, ...missing].filter(Boolean).join(" · ");
-}
-
 export function renderPlanReference(container, plan, source) {
   container.hidden = !plan?.reference;
   if (container.hidden) { container.replaceChildren(); delete container.dataset.key; return; }

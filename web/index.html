@@ -57,9 +57,9 @@
       <div id="plan-reference" class="plan-reference" hidden></div>
           <div id="plan-timing" class="schedule-controls" role="group" aria-label="Monitoring timing">
             <label for="start-delay" class="camera-only">Start after <span class="schedule-input"><input id="start-delay" type="number" min="0" max="1440" step="1" value="0" required><span>minutes</span></span></label>
-            <label for="check-interval"><span class="camera-only">Check every</span><span class="demo-only">Sample every</span> <span class="schedule-input"><input id="check-interval" type="number" min="1" max="86400" step="1" value="60" required><span>seconds</span></span></label>
+            <label for="check-interval"><span class="camera-only">Check every</span><span class="demo-only">Sample at</span> <span class="schedule-input"><input id="check-interval" type="number" min="1" max="86400" step="1" value="60" required><span class="camera-only">seconds</span><span class="demo-only">fps</span></span></label>
           </div>
-      <p id="plan-timing-note" class="demo-only muted small">Video seconds between previews. Each decision finishes before the video advances.</p>
+      <p id="plan-timing-note" class="demo-only muted small">Frames sampled per video second. The demo advances after each decision.</p>
       <div class="plan-actions">
         <button id="plan-close" class="button secondary" type="button" hidden>Close</button>
         <button id="plan-edit" class="button secondary" type="button" autofocus>Request edits</button>
@@ -79,13 +79,12 @@
         </div>
         <details id="active-plan-reference" hidden><summary>Plan reference</summary><div id="active-reference" class="plan-reference" hidden></div></details>
         <div class="session-timing"><span id="next-check">Connecting to camera…</span><span>Elapsed <span id="elapsed" class="mono">00:00</span></span></div>
-        <p id="session-detail" class="muted small"></p>
+        <p id="session-detail" class="muted small" role="status"></p>
         <p id="output-path" class="output-path"></p>
-        <label id="highlight-control" class="highlight-control" hidden><input id="show-highlights" type="checkbox" checked> Show intent highlights</label>
       </div>
       <section class="timeline-section" aria-labelledby="timeline-title">
         <div class="timeline-header"><div><h2 id="timeline-title" class="sr-only">Session photos</h2><div class="view-switch" role="group" aria-label="Photo view"><button id="view-all" type="button" aria-pressed="true">All previews</button><button id="view-saved" type="button" aria-pressed="false">Saved photos</button></div></div><button id="go-latest" class="text-button" type="button" hidden>Return to latest ↓</button></div>
-        <div id="timeline" class="timeline" tabindex="0" aria-label="Session activity. Scroll vertically to browse previews and actions."></div>
+        <div id="timeline" class="timeline" tabindex="0" aria-label="Session previews and saved photos."></div>
         <div id="timeline-empty" class="timeline-empty">The first preview will appear here after the camera connects.</div>
       </section>
     </section>
@@ -97,8 +96,7 @@
   </dialog>
   <dialog id="image-viewer" aria-labelledby="image-title">
     <div class="image-toolbar"><h2 id="image-title">Observation</h2><button id="close-viewer" class="button secondary" type="button" autofocus>Close ×</button></div>
-    <div class="image-surface"><img id="viewer-image" alt=""><svg id="viewer-overlay" class="intent-overlay" aria-hidden="true"></svg></div>
-    <p id="viewer-annotations" class="muted small"></p>
+    <div class="image-surface"><img id="viewer-image" alt=""></div>
     <div id="viewer-downloads" class="download-links"></div>
   </dialog>
 </body>

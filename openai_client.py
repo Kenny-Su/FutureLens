@@ -61,23 +61,6 @@ def image_content(image: Image.Image) -> dict:
     return {"type": "input_image", "image_url": "data:image/jpeg;base64," + encode_image(image)}
 
 
-def text_content(value) -> dict:
-    """Text block for local observation logs."""
-    return {"type": "text", "text": json.dumps(value, ensure_ascii=False)}
-
-
-def response_usage(response: dict) -> dict:
-    usage = response.get("usage", {})
-    if not isinstance(usage, dict):
-        return {}
-    result = {key: usage[key] for key in ("input_tokens", "output_tokens")
-              if type(usage.get(key)) is int and usage[key] >= 0}
-    details = usage.get("input_tokens_details", {})
-    if isinstance(details, dict) and type(details.get("cached_tokens")) is int:
-        result["cache_read_input_tokens"] = details["cached_tokens"]
-    return result
-
-
 def encode_payload(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 

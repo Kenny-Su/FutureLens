@@ -27,7 +27,7 @@ MAX_VIDEO_BYTES = 2 * 1024**3
 
 
 def session_settings(data):
-    if not isinstance(data, dict) or set(data) - {"request", "interval_s", "start_delay_s"}:
+    if not isinstance(data, dict) or set(data) - {"request", "interval_s", "start_delay_s", "demo_fps"}:
         raise ValueError("Invalid session settings.")
     return SessionSettings(**{"request": "", **data})
 
@@ -71,12 +71,13 @@ class SessionManager:
             if self.operation is not None:
                 raise ValueError("A camera operation is already running.")
             draft = self._draft(data)
-            if (set(data) - {"intent_id", "revision", "interval_s", "start_delay_s"} or draft["status"] != "ready"
+            timing_fields = {"demo_fps"} if self.demo else {"interval_s", "start_delay_s"}
+            if (set(data) - ({"intent_id", "revision"} | timing_fields) or draft["status"] != "ready"
                     or not draft["plans"]):
                 raise ValueError("Review the current interpretation before starting.")
             output = self._folder("session")
             settings = session_settings({"request": draft["request"],
-                **{key: data[key] for key in ("interval_s", "start_delay_s") if key in data}})
+                **{key: data[key] for key in timing_fields if key in data}})
             validate_config(load_config())
             self._require_source()
             approved = ApprovedPlan.create(draft, self.output_root / draft["plans"][-1]["reference_id"] / "reference.jpg",
@@ -408,8 +409,7 @@ class SessionManager:
                     allowed.add("reference.jpg")
                 for entry in report.get("observations", []):
                     allowed.add(entry["preview_file"])
-                    if entry.get("capture_status") == "downloaded":
-                        allowed.update(entry.get("saved_files", []))
+                    allowed.update(entry.get("saved_files", []))
             else:
                 raise FileNotFoundError()
             path = (folder / name).resolve()
@@ -481,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = page.encode()
                 self._headers(200, "text/html; charset=utf-8", len(data))
                 self.wfile.write(data)
-            elif path in ("/app.js", "/activity.mjs", "/intent.mjs", "/review.js", "/style.css"):
+            elif path in ("/app.js", "/intent.mjs", "/review.js", "/style.css"):
                 self._file(STATIC / path[1:])
             elif path.startswith("/media/"):
                 _, _, session, name = path.split("/", 3)

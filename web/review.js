@@ -6,15 +6,20 @@ export class IntentReview {
     Object.assign(this, {request, accept, notify, started, cancelled});
     this.draft = null; this.busy = false;
     this.demo = document.documentElement.dataset.mode === "demo";
-    this.scheduleKey = this.demo ? "waitless.demo.schedule" : "waitless.schedule";
+    this.scheduleKey = this.demo ? "waitless.demo.sampling" : "waitless.schedule";
     $("check-interval").value = this.demo ? 1 : 60;
+    if (this.demo) {
+      $("check-interval").min = "0.1";
+      $("check-interval").step = "0.1";
+      $("check-interval").removeAttribute("max");
+    }
     this.messageNodes = new Map();
     this.dialogPlan = null;
     try {
       const saved = JSON.parse(localStorage.getItem(this.scheduleKey));
       if (saved) {
-        $("start-delay").value = saved.start_delay_s / 60;
-        $("check-interval").value = saved.interval_s;
+        $("start-delay").value = (saved.start_delay_s ?? 0) / 60;
+        $("check-interval").value = this.demo ? saved.demo_fps : saved.interval_s;
         if (!this.schedule()) throw new Error("Invalid saved timing");
       }
     } catch {
@@ -58,7 +63,8 @@ export class IntentReview {
   schedule() {
     const delay = $("start-delay"), interval = $("check-interval");
     if (!delay.validity.valid || !interval.validity.valid) return null;
-    return {start_delay_s: this.demo ? 0 : delay.valueAsNumber * 60, interval_s: interval.valueAsNumber};
+    return this.demo ? {demo_fps: interval.valueAsNumber}
+      : {start_delay_s: delay.valueAsNumber * 60, interval_s: interval.valueAsNumber};
   }
   render(state, connected = true, pending = false, hasSource = false) {
     this.connected = connected; this.operation = state.operation; this.pending = pending;

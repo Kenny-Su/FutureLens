@@ -1,5 +1,4 @@
-import { sessionActivity } from "./activity.mjs";
-import { drawOverlay, svgNode, annotationTargets, observationText, renderPlanReference } from "./intent.mjs";
+import { renderPlanReference } from "./intent.mjs";
 import { IntentReview } from "./review.js";
 
 const $ = (id) => document.getElementById(id);
@@ -11,13 +10,10 @@ const reasons = {
   video_end: "The video has ended. Your captured frames are saved locally.",
   camera_disconnected: "iPhone disconnected. Reconnect it and review the scene to start again.",
 };
-const captureLabels = { downloaded: "Photo saved", requested: "Preparing capture", shutter_sent: "Processing photo", failed_after_shutter: "Save unconfirmed", failed_or_unconfirmed: "Capture unconfirmed", skipped_stale_frame: "Preview expired", skipped_expired_before_shutter: "Capture expired", skipped_user_stop: "Session stopped", skipped_video_end: "Video ended before capture", skipped_condition_unmet: "Capture condition not met" };
-const outcomes = { no_photo: "No photo", stale_preview: "Preview expired", user_stop: "Session stopped", error: "Observation failed", ...captureLabels };
 let state, connected = false, pending = false, showingMonitor = false, sessionId = null, initialized = false;
 let commandGeneration = 0, following = true, viewerFrameId = null, savedOnly = false;
-let connectionProblemReported = false, lastCheckError = null, lastSessionError = null, lastSourceError = null;
+let connectionProblemReported = false, lastCheckError = null, lastSourceError = null;
 const rows = new Map();
-const previews = new Map();
 const review = new IntentReview({request: (path, data) => { if (data !== undefined) commandGeneration++; return api(path, data); }, accept, notify: notice,
   cancelled: () => { showingMonitor = false; render(); },
   started: () => { showingMonitor = true; following = true; render(); window.scrollTo(0, 0); }});
@@ -49,7 +45,7 @@ function cameraCheckError(check) {
 
 function sessionError(next) {
   const report = next.report || {};
-  return next.error || (report.status === "failed" ? report.camera_error || `Session stopped (${report.error_type || "error"}). Check the saved logs.` : null);
+  return next.error || report.error || report.camera_error || (report.status === "failed" ? "Session failed." : null);
 }
 
 function loadPreview(image, url) {
@@ -105,7 +101,6 @@ function accept(next) {
     viewerFrameId = null;
     $("image-viewer").close();
     rows.clear();
-    previews.clear();
     $("timeline").replaceChildren();
     showingMonitor = Boolean(sessionId);
   } else if (!initialized) {
@@ -116,10 +111,6 @@ function accept(next) {
   const checkError = cameraCheckError(state.camera_check);
   if (checkError && checkError !== lastCheckError) notice(checkError);
   lastCheckError = checkError;
-  const error = sessionError(state);
-  const key = error ? `${sessionId}:${error}` : null;
-  if (key && key !== lastSessionError) notice(error);
-  lastSessionError = key;
   if (state.source_error && state.source_error !== lastSourceError) notice(state.source_error);
   lastSourceError = state.source_error;
 }
@@ -160,7 +151,7 @@ function element(tag, className, value) {
   if (value !== undefined) node.textContent = value;
   return node;
 }
-function captured(entry) { return entry.capture_status === "downloaded" && entry.saved_files?.length > 0; }
+function captured(entry) { return entry.saved_files?.length > 0; }
 function entries() { return state.report?.observations || []; }
 function browsing() { following = false; show("go-latest", true); }
 function downloads(container, entry) {
@@ -184,27 +175,16 @@ function openImage(id) {
   loadPreview($("viewer-image"), media(entry.preview_file));
   $("viewer-image").alt = `Observation ${id + 1} at ${clock(entry.timestamp_s)} into the session`;
   downloads($("viewer-downloads"), entry);
-  const targets = annotationTargets(entry, state.report?.approval);
-  drawOverlay($("viewer-overlay"), targets, entry.width, entry.height);
-  $("viewer-overlay").toggleAttribute("hidden", !targets.length || !$("show-highlights").checked);
-  text("viewer-annotations", observationText(entry, state.report?.approval));
   if (!$("image-viewer").open) $("image-viewer").showModal();
 }
-function activityHeading(surface, label, item) {
-  const heading = element("div", "activity-heading");
-  const timestamp = element("time", "activity-time", clock(item.elapsed));
-  if (item.timestamp) {
-    timestamp.dateTime = item.timestamp;
-    timestamp.title = new Date(item.timestamp).toLocaleTimeString();
-  }
-  heading.append(element("h3", "activity-label", label), timestamp);
-  surface.append(heading);
-}
-function renderPreview(row, item) {
-  const entry = item.entry;
+function renderPreview(row, entry) {
   if (!row.firstChild) {
     const surface = element("div", "preview-card");
-    activityHeading(surface, entry.video_position_s !== undefined ? `Video · ${clock(entry.video_position_s)}` : `Preview ${String(entry.frame_id + 1).padStart(2, "0")}`, item);
+    const heading = element("div", "preview-heading");
+    heading.append(element("h3", "preview-label", entry.video_position_s !== undefined
+      ? `Video · ${clock(entry.video_position_s)}` : `Preview ${String(entry.frame_id + 1).padStart(2, "0")}`),
+      element("time", "preview-time", clock(entry.timestamp_s)));
+    surface.append(heading);
     const button = element("button", "preview-button");
     button.type = "button";
     button.setAttribute("aria-label", `Enlarge observation ${entry.frame_id + 1}`);
@@ -212,55 +192,14 @@ function renderPreview(row, item) {
     image.alt = `Preview ${entry.frame_id + 1}`;
     image.loading = "lazy";
     loadPreview(image, media(entry.preview_file));
-    button.append(image, svgNode("svg", {class: "intent-overlay", "aria-hidden": "true"}), element("span", "saved-marker", "✓ Photo saved"));
+    button.append(image, element("span", "saved-marker", "✓ Photo saved"));
     button.addEventListener("click", () => openImage(entry.frame_id));
-    surface.append(button, element("p", "preview-annotations muted small"), element("div", "download-links"));
+    surface.append(button, element("div", "download-links"));
     row.append(surface);
   }
   downloads(row.querySelector(".download-links"), entry);
   row.classList.toggle("captured", captured(entry));
   row.querySelector(".saved-marker").hidden = !captured(entry);
-  const overlay = row.querySelector("svg");
-  const targets = annotationTargets(entry, state.report?.approval);
-  drawOverlay(overlay, targets, entry.width, entry.height);
-  overlay.toggleAttribute("hidden", !targets.length || !$("show-highlights").checked);
-  row.querySelector(".preview-annotations").textContent = observationText(entry, state.report?.approval);
-}
-function renderAction(row, item) {
-  if (row.dataset.revision === item.revision) return;
-  const event = item.event;
-  row.replaceChildren();
-  row.dataset.revision = item.revision;
-  row.dataset.status = event.status;
-  let label, detail = "", saved = false;
-  if (item.kind === "model") {
-    label = item.noPhoto ? "Keep watching" : event.status === "completed" ? "Scene evaluated" : "Evaluate scene";
-    detail = event.status === "started" ? "Evaluating the scene…"
-      : event.status === "completed" ? (item.noPhoto ? "No photograph requested · " : "") + `${event.latency_s.toFixed(1)} sec`
-      : event.status === "failed" ? "Evaluation failed · session ended" : outcomes[event.reason] || "Evaluation skipped";
-  } else if (item.kind === "capture") {
-    const status = event.capture_status;
-    label = captureLabels[status] || "Take photograph";
-    saved = status === "downloaded";
-    detail = saved ? `${(event.saved_files || []).length} photo file${(event.saved_files || []).length === 1 ? "" : "s"} saved`
-      : status === "shutter_sent" ? "Saving captured photo"
-      : status?.startsWith("failed") || event.status === "failed" ? "Capture unconfirmed · no automatic retry"
-      : status?.startsWith("skipped") ? "No shutter command was sent" : "Preparing the camera";
-    row.dataset.status = saved ? "completed" : event.status;
-  } else {
-    label = outcomes[event.outcome] || "Observation ended";
-    detail = event.outcome === "stale_preview" ? "Waiting for a fresh preview" : "";
-  }
-  row.classList.toggle("success", saved);
-  const surface = element("div", "action-card");
-  activityHeading(surface, label, item);
-  if (detail) surface.append(element("p", "activity-detail", detail));
-  if (saved) {
-    const links = element("div", "download-links");
-    downloads(links, item.entry);
-    surface.append(links);
-  }
-  row.append(surface);
 }
 function followLatest() {
   $("timeline").scrollTop = $("timeline").scrollHeight;
@@ -269,27 +208,21 @@ function renderTimeline(observations) {
   const timeline = $("timeline");
   const previousTop = timeline.scrollTop;
   let previousRow = null;
-  const items = sessionActivity(observations).filter(item => !savedOnly || (item.kind === "preview" && captured(item.entry)));
-  const visibleIds = new Set(items.map(item => item.id));
+  const items = observations.filter(entry => !savedOnly || captured(entry));
+  const visibleIds = new Set(items.map(entry => entry.frame_id));
   for (const [id, row] of rows) if (!visibleIds.has(id)) row.remove();
   timeline.classList.toggle("saved-only", savedOnly);
-  for (const item of items) {
-    let row = rows.get(item.id);
+  for (const entry of items) {
+    let row = rows.get(entry.frame_id);
     if (!row) {
-      row = element("article", `thread-item kind-${item.kind}`);
-      row.dataset.activityId = item.id;
-      row.dataset.observationId = item.entry.frame_id;
-      if (item.kind === "preview") {
-        row.id = `observation-${item.entry.frame_id}`;
-        previews.set(item.entry.frame_id, row);
-      }
-      rows.set(item.id, row);
+      row = element("article", "thread-item kind-preview");
+      row.id = `observation-${entry.frame_id}`;
+      rows.set(entry.frame_id, row);
     }
     const next = previousRow ? previousRow.nextElementSibling : timeline.firstElementChild;
     if (next !== row) timeline.insertBefore(row, next);
     previousRow = row;
-    if (item.kind === "preview") renderPreview(row, item);
-    else renderAction(row, item);
+    renderPreview(row, entry);
   }
   if (following) followLatest();
   else timeline.scrollTop = previousTop;
@@ -321,12 +254,12 @@ function renderMonitor() {
     (state.intent?.status === "approved" ? state.intent.plans.at(-1)?.plan.instructions : "") || report.request || state.intent?.request || "");
   show("active-plan-reference", Boolean(report.approval?.plan.reference));
   renderPlanReference($("active-reference"), report.approval?.plan, report.approval?.plan.reference?.photo ? media(report.approval.plan.reference.photo) : "");
-  text("interval-label", demo ? "Sample every" : "Every");
-  text("active-interval", `${report.current_interval_s ?? 60} sec`);
+  text("interval-label", demo ? "Sampling at" : "Every");
+  text("active-interval", demo ? `${report.settings?.demo_fps ?? 1} fps` : `${report.settings?.interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (scheduled ? demo ? state.source.name : "Camera" : active ? demo ? "Opening video…" : "Connecting…" : "Not connected"));
   text("timeline-empty", demo ? "The first video preview will appear here when monitoring begins." : "The first preview will appear here after the camera connects.");
   text("shot-count", report.photos_taken || 0);
-  text("session-detail", failed ? ""
+  text("session-detail", failed ? sessionError(state)
     : stopping ? "Waiting for an active operation to finish. A capture already sent to the camera may still complete."
     : scheduled ? `Starts at ${new Date(report.scheduled_start_at * 1000).toLocaleString()}` : active ? ""
     : reasons[report.stop_reason] || "This session has ended. Your files are saved locally.");
@@ -369,8 +302,6 @@ function render() {
   review.render(state, connected, pending, Boolean(state.source.id));
   if (showingMonitor && !reviewing) {
     renderMonitor();
-    const intent = state.report?.approval;
-    show("highlight-control", entries().some(entry => annotationTargets(entry, intent).length));
     if ($("image-viewer").open && viewerFrameId !== null) openImage(viewerFrameId);
   }
 }
@@ -385,7 +316,6 @@ for (const [id, onlySaved] of [["view-all", false], ["view-saved", true]]) {
   });
 }
 
-$("show-highlights").addEventListener("change", () => render());
 $("source-camera").addEventListener("click", () => state.source.mode === "camera" && state.source.id
   ? command("/api/camera/disconnect") : command("/api/source", {mode: "camera"}));
 $("source-video").addEventListener("click", () => $("demo-file").click());
@@ -406,7 +336,6 @@ $("new-session").addEventListener("click", () => {
 $("return-session").addEventListener("click", () => { showingMonitor = true; render(); });
 $("go-latest").addEventListener("click", () => {
   following = true;
-  for (const preview of previews.values()) preview.classList.remove("focused");
   followLatest();
   show("go-latest", false);
 });

@@ -94,7 +94,6 @@ class MacCamera:
         self.capabilities = {}
         self.failure = None
         self.closing = False
-        self.last_capture_info = None
 
     def _accept_camera(self, event):
         if event.get("device_id") != self.device_id or not isinstance(event.get("model"), str) or not event["model"]:
@@ -178,7 +177,7 @@ class MacCamera:
             frame = ImageOps.exif_transpose(image).convert("RGB")
         return CameraFrame(frame, requested_at, event["frame_no"])
 
-    def capture(self, capture_id: int, on_shutter=None):
+    def capture(self, capture_id: int):
         if not self.enable_capture:
             raise RuntimeError("Still-photo capture is disabled in preview mode")
         if type(capture_id) is not int or capture_id < 0:
@@ -187,15 +186,10 @@ class MacCamera:
             raise RuntimeError("Session stopped before capture")
         self._send("PHOTO")
         self._receive("shutter")
-        if on_shutter:
-            on_shutter()
         event = self._receive("photo")
         with Image.open(io.BytesIO(event["data"])) as image:
             if image.format != "JPEG":
                 raise RuntimeError("The iPhone returned an unexpected photo format")
-            frame = ImageOps.exif_transpose(image)
-            self.last_capture_info = {"kind": "photo", "width": frame.width, "height": frame.height,
-                                      "format": "JPEG", "quality_prioritization": "quality"}
         folder = self.output / f"{capture_id:05d}"
         folder.mkdir(parents=True, exist_ok=False)
         path = folder / "photo.jpg"

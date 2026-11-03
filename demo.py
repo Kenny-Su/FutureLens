@@ -67,7 +67,7 @@ class VideoCamera:
         self.frame_no = 0
         self.position = 0
         self.current_image = None
-        self.last_frame_position = self.last_capture_position = None
+        self.last_frame_position = None
 
     def __enter__(self):
         self.container = open_video(self.video.path)
@@ -106,22 +106,19 @@ class VideoCamera:
         self.frame_no += 1
         return CameraFrame(image, requested, self.frame_no)
 
-    def capture(self, capture_id, on_shutter=None):
+    def capture(self, capture_id):
         if not self.enable_capture:
             raise RuntimeError("Shutter control is disabled in preview mode")
         if type(capture_id) is not int or capture_id < 0:
             raise ValueError("Invalid demo capture request.")
-        image, position = self.current_image, self.last_frame_position
+        image = self.current_image
         if image is None:
             raise RuntimeError("Read a preview before capturing.")
         folder = self.output / f"{capture_id:05d}"
         self.output.mkdir(parents=True, exist_ok=True)
         folder.mkdir()
-        if on_shutter:
-            on_shutter()
         path = folder / "frame.jpg"
         image.save(path, quality=95, subsampling=0)
-        self.last_capture_position = position
         return [path]
 
     def __exit__(self, *_):
