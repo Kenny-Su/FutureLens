@@ -101,7 +101,7 @@ export class IntentReview {
     $("check-interval").disabled = locked;
     $("intent-start").textContent = timing?.start_delay_s ? "Confirm and schedule" : "Confirm and start";
     $("intent-start").disabled = !active || !this.hasSource || !this.draft.plan_ready || this.draft.condition_stale ||
-      Boolean(this.draft.question || this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
+      Boolean(this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
     $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
     const sendLabel = !message && retry ? "Retry reply" : "Send message";
     $("intent-refine").setAttribute("aria-label", sendLabel);
@@ -111,7 +111,7 @@ export class IntentReview {
     $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
     const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;
-    const ready = Boolean(this.draft?.plan_ready && !this.draft.condition_stale && !this.draft.question && !this.draft.pending_message_id);
+    const ready = Boolean(this.draft?.plan_ready && !this.draft.condition_stale && !this.draft.pending_message_id);
     this.canReviewPlan = ready && active && !message && this.hasSource;
     for (const button of $("review-messages").querySelectorAll(".review-plan-button")) {
       const current = button.dataset.planKey === this.planKey();
@@ -146,10 +146,6 @@ export class IntentReview {
       author.textContent = turn.role === "user" ? "You" : "WaitLess";
       const body = document.createElement("p"); body.className = "message-text"; body.textContent = turn.text;
       article.append(author, body);
-      if (turn.question) {
-        const question = document.createElement("p"); question.className = "message-question";
-        question.textContent = turn.question; article.append(question);
-      }
       if (turn.role === "assistant" && turn.plan_ready) {
         const notice = document.createElement("div"); notice.className = "plan-ready-notice";
         const description = document.createElement("p");

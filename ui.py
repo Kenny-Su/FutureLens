@@ -73,7 +73,7 @@ class SessionManager:
             draft = self._draft(data)
             if (set(data) - {"intent_id", "revision", "interval_s", "start_delay_s"} or draft["status"] != "ready"
                     or draft.get("plan_ready") is not True or draft.get("condition_stale")
-                    or draft.get("question") or draft.get("pending_message_id")):
+                    or draft.get("pending_message_id")):
                 raise ValueError("Review the current interpretation before starting.")
             output = self._folder("session")
             settings = session_settings({"request": draft["request"],
@@ -144,9 +144,9 @@ class SessionManager:
             draft = {"id": self.intent_output.name, "revision": 1, "request": settings.request,
                      "source": self.source(),
                      "status": "preparing", "condition": "", "targets": [], "error": None,
-                     "preview": None, "condition_stale": True, "question": "", "plan_ready": False,
+                     "preview": None, "condition_stale": True, "plan_ready": False,
                      "conversation": conversation, "pending_message_id": message["id"],
-                     "previous_interpretation": {k: previous[k] for k in ("condition", "targets", "question")} if previous else None}
+                     "previous_interpretation": {k: previous[k] for k in ("condition", "targets")} if previous else None}
             self._save_intent(draft)
             self._launch("intent", lambda: self._interpret(generation, deepcopy(draft), config, fresh=True))
 
@@ -208,7 +208,7 @@ class SessionManager:
                         return
                     self._save_intent(deepcopy(draft))
             with Image.open(folder / "reference.jpg") as image:
-                previous = ({k: draft[k] for k in ("condition", "targets", "question")}
+                previous = ({k: draft[k] for k in ("condition", "targets")}
                             if draft["condition"] else draft.get("previous_interpretation"))
                 reply, tool_turn = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
                                                 previous=deepcopy(previous), reference_changed=fresh,
@@ -216,10 +216,10 @@ class SessionManager:
             # Validate model output before replacing the current interpretation.
             reply = validate_review(reply)
             plan = {k: reply[k] for k in ("condition", "targets")}
-            draft.update(plan, plan_ready=reply["plan_ready"], question=reply["question"], status="ready", revision=draft["revision"] + 1,
+            draft.update(plan, plan_ready=reply["plan_ready"], status="ready", revision=draft["revision"] + 1,
                          error=None, condition_stale=False, pending_message_id=None)
             draft["conversation"].append(self._message("assistant", reply["reply"], condition=reply["condition"],
-                                                       question=reply["question"], plan_ready=reply["plan_ready"], targets=deepcopy(reply["targets"]),
+                                                       plan_ready=reply["plan_ready"], targets=deepcopy(reply["targets"]),
                                                        reference_id=draft["id"], revision=draft["revision"], tool_turn=tool_turn))
         except Exception as exc:
             draft.update(status="ready" if draft["condition"] else "failed",

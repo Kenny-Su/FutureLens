@@ -59,18 +59,15 @@ def validate_intent(value, width=1, height=1, *, allow_empty=False):
 
 
 def validate_review(value, *, width=1, height=1):
-    fields = {"condition", "reply", "question", "targets", "plan_ready"}
+    fields = {"condition", "reply", "targets", "plan_ready"}
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("The review reply is incomplete. Try again.")
-    question = value["question"]
-    if not isinstance(question, str) or len(question) > 2000:
-        raise ValueError("The clarification question must be text up to 2,000 characters.")
-    if type(value["plan_ready"]) is not bool or (value["plan_ready"] and question.strip()):
-        raise ValueError("A plan cannot be ready while clarification is unresolved.")
+    if type(value["plan_ready"]) is not bool:
+        raise ValueError("Plan readiness must be a boolean.")
     if not value["plan_ready"] and value["condition"] != "":
         raise ValueError("Leave the shooting plan empty until it is ready for approval.")
     result = {"plan_ready": value["plan_ready"],
-              "reply": text(value["reply"], "Review reply", 8000), "question": question.strip()}
+              "reply": text(value["reply"], "Review reply", 8000)}
     result.update(validate_intent({k: value[k] for k in ("condition", "targets")}, width, height,
                                   allow_empty=not value["plan_ready"]))
     return result
@@ -86,7 +83,7 @@ class ApprovedIntent:
     @classmethod
     def create(cls, draft, reference_path, approved_at):
         if (draft.get("plan_ready") is not True or draft.get("condition_stale")
-                or draft.get("question") or draft.get("pending_message_id")):
+                or draft.get("pending_message_id")):
             raise ValueError("Resolve the latest review before starting.")
         plan = validate_intent({k: draft[k] for k in ("condition", "targets")})
         with Image.open(reference_path) as image:

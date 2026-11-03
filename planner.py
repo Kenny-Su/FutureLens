@@ -2,7 +2,7 @@
 
 import json
 
-from intent import TARGET_SCHEMA, object_schema, text, validate_intent, validate_review
+from intent import TARGET_SCHEMA, object_schema, validate_intent, validate_review
 from openai_client import image_content, model_image, post_json
 
 PLANNING_MODEL = "gpt-6-astra"
@@ -10,10 +10,11 @@ RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
 EFFORT = "medium"
 MAX_OUTPUT_TOKENS = 8192
 
-PLANNER_DEVELOPER_INSTRUCTIONS = """Use the image and conversation to understand what the photographer wants to capture.
+PLANNER_DEVELOPER_INSTRUCTIONS = """Work with the photographer to establish a shared understanding of the desired photograph, including any visual details that materially affect which moments qualify.
 Develop a concrete shooting plan for their approval without adding unrequested aesthetic preferences or requirements.
 The monitor evaluates one preview at a time, so the plan must be self-contained and assessable from a single image.
-Use propose_plan to present a plan for approval. Only the photographer can authorize monitoring."""
+Discuss details and clarify preferences in the conversation. Use tools to highlight regions and present a plan for approval as needed.
+Only the photographer can authorize monitoring."""
 
 PROPOSE_PLAN = {
     "type": "function", "name": "propose_plan",
@@ -24,16 +25,6 @@ PROPOSE_PLAN = {
         "reply": {"type": "string", "description": "Conversational introduction to the proposed plan."},
     }),
 }
-ASK_PHOTOGRAPHER = {
-    "type": "function", "name": "ask_photographer",
-    "description": "Ask the photographer for information or preferences needed to work out their shooting plan. Returns their answer.",
-    "strict": True,
-    "parameters": object_schema({
-        "reply": {"type": "string", "description": "Brief conversational context for the question."},
-        "question": {"type": "string", "description": "The question to show the photographer."},
-    }),
-}
-
 HIGHLIGHT_REGIONS = {
     "type": "function", "name": "highlight_regions",
     "description": "Highlight visible regions on the photographer's preview. Replaces the current highlights; an empty list clears them. Returns immediately.",
@@ -49,9 +40,9 @@ def make_planning_payload(request_text, image, conversation, context):
         if turn["role"] == "assistant" and turn.get("tool_turn"):
             messages.extend(turn["tool_turn"])
             pending_call = next((item["call_id"] for item in turn["tool_turn"]
-                                 if item["type"] == "function_call" and item["name"] in ("ask_photographer", "propose_plan")), None)
+                                 if item["type"] == "function_call" and item["name"] == "propose_plan"), None)
         elif turn["role"] == "assistant":
-            content = {"plan_ready": turn.get("plan_ready", False), "reply": turn["text"], "condition": turn["condition"], "question": turn["question"],
+            content = {"plan_ready": turn.get("plan_ready", False), "reply": turn["text"], "condition": turn["condition"],
                        "highlights_normalized": turn.get("targets", []), "reference_id": turn.get("reference_id")}
             messages.append({"role": "assistant", "content": json.dumps(content, ensure_ascii=False)})
         elif pending_call:
@@ -68,7 +59,7 @@ def make_planning_payload(request_text, image, conversation, context):
     return {"model": PLANNING_MODEL, "max_output_tokens": MAX_OUTPUT_TOKENS,
             "instructions": PLANNER_DEVELOPER_INSTRUCTIONS, "reasoning": {"effort": EFFORT},
             "input": messages, "store": False, "include": ["reasoning.encrypted_content"],
-            "tools": [ASK_PHOTOGRAPHER, HIGHLIGHT_REGIONS, PROPOSE_PLAN],
+            "tools": [HIGHLIGHT_REGIONS, PROPOSE_PLAN],
             "tool_choice": "auto", "parallel_tool_calls": False}
 
 
@@ -91,18 +82,14 @@ def review_intent(request_text, image, config, *, conversation=None, previous=No
             if not blocks or any(block["type"] != "output_text" for block in blocks):
                 raise ValueError("The planner did not return a reply. Try again.")
             value = {"reply": "\n".join(block["text"] for block in blocks), "condition": "",
-                     "question": "", "plan_ready": False, "targets": targets}
+                     "plan_ready": False, "targets": targets}
             return validate_review(value), tool_turn
         if len(calls) != 1:
             raise ValueError("Unexpected planner tool calls.")
         call = calls[0]
         value = json.loads(call["arguments"])
-        if call["name"] == "ask_photographer":
-            value["question"] = text(value["question"], "Clarification question", 2000)
-            value.update(condition="", plan_ready=False, targets=targets)
-            return validate_review(value), tool_turn
         if call["name"] == "propose_plan":
-            value.update(question="", plan_ready=True, targets=targets)
+            value.update(plan_ready=True, targets=targets)
             return validate_review(value), tool_turn
         if call["name"] != "highlight_regions":
             raise ValueError("Unexpected planner tool call.")
