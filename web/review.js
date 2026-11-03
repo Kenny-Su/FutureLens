@@ -33,6 +33,7 @@ export class IntentReview {
       }
     });
     $("review-composer").addEventListener("submit", event => { event.preventDefault(); this.send(); });
+    $("plan-close").addEventListener("click", () => $("plan-dialog").close());
     $("plan-edit").addEventListener("click", () => {
       $("plan-dialog").close();
       $("intent-feedback").placeholder = "What would you like to change about the plan?";
@@ -100,8 +101,8 @@ export class IntentReview {
     $("start-delay").disabled = locked;
     $("check-interval").disabled = locked;
     $("intent-start").textContent = timing?.start_delay_s ? "Confirm and schedule" : "Confirm and start";
-    $("intent-start").disabled = !active || !this.hasSource || !this.draft.plan || this.draft.plan_stale ||
-      Boolean(this.draft.pending_message_id || message || validPlan(this.draft.plan)) || !timing;
+    $("intent-start").disabled = !active || !this.hasSource || this.dialogPlan !== this.planKey() ||
+      Boolean(validPlan(this.draft.plans.at(-1)?.plan)) || !timing;
     $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
     const sendLabel = !message && retry ? "Retry reply" : "Send message";
     $("intent-refine").setAttribute("aria-label", sendLabel);
@@ -111,27 +112,37 @@ export class IntentReview {
     $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
     const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;
-    const ready = Boolean(this.draft?.plan && !this.draft.plan_stale && !this.draft.pending_message_id);
-    this.canReviewPlan = ready && active && !message && this.hasSource;
+    const ready = Boolean(this.draft?.plans.length);
+    this.canReviewPlan = ready && active && this.hasSource;
     for (const button of $("review-messages").querySelectorAll(".review-plan-button")) {
       const current = button.dataset.planKey === this.planKey();
-      button.disabled = !current || !this.canReviewPlan;
-      button.textContent = current ? "Review shooting plan" : "Previous plan";
-      button.closest(".plan-ready-notice").querySelector("p").textContent = current && ready
+      button.disabled = !this.canReviewPlan;
+      button.textContent = current ? "Review shooting plan" : "View previous plan";
+      button.closest(".plan-ready-notice").querySelector("p").textContent = current
         ? "Your shooting plan is ready, waiting for your approval."
-        : "This plan has been superseded by the conversation below.";
+        : "This is a previous proposal.";
     }
+    const historical = this.dialogPlan !== this.planKey();
+    $("plan-title").textContent = historical ? "Previous shooting plan" : "Your shooting plan";
+    $("plan-close").hidden = !historical;
+    $("plan-timing").hidden = historical;
+    $("plan-timing-note").hidden = historical;
+    $("plan-edit").hidden = historical;
+    $("intent-start").hidden = historical;
     $("plan-edit").disabled = locked;
-    if ($("plan-dialog").open && (!ready || this.dialogPlan !== this.planKey() || !this.connected || !this.hasSource)) {
+    if ($("plan-dialog").open && (!ready || !this.draft.plans.some(plan => plan.id === this.dialogPlan) || !this.connected || !this.hasSource)) {
       $("plan-dialog").close();
     }
   }
-  planKey() { return this.draft ? `${this.draft.id}:${this.draft.revision}` : null; }
-  openPlan() {
+  planKey() { return this.draft?.plans.at(-1)?.id ?? null; }
+  openPlan(id) {
     if (!this.canReviewPlan) return;
-    this.dialogPlan = this.planKey();
-    $("plan-instructions").textContent = this.draft.plan.instructions;
-    renderPlanReference($("plan-reference"), this.draft.plan, this.draft.preview);
+    const proposal = this.draft.plans.find(plan => plan.id === id);
+    if (!proposal) return;
+    this.dialogPlan = id;
+    $("plan-instructions").textContent = proposal.plan.instructions;
+    renderPlanReference($("plan-reference"), proposal.plan, proposal.preview);
+    this.controls();
     if (!$("plan-dialog").open) $("plan-dialog").showModal();
   }
   conversation() {
@@ -147,16 +158,16 @@ export class IntentReview {
       author.textContent = turn.role === "user" ? "You" : "WaitLess";
       const body = document.createElement("p"); body.className = "message-text"; body.textContent = turn.text;
       article.append(author, body);
-      if (turn.role === "assistant" && turn.plan) {
+      if (turn.role === "assistant" && turn.plan_id) {
         const notice = document.createElement("div"); notice.className = "plan-ready-notice";
         const description = document.createElement("p");
         description.textContent = "Your shooting plan is ready, waiting for your approval.";
         const button = document.createElement("button");
         button.type = "button"; button.className = "button secondary review-plan-button";
-        button.dataset.planKey = `${turn.reference_id}:${turn.revision}`;
+        button.dataset.planKey = turn.plan_id;
         button.textContent = "Review shooting plan";
         button.addEventListener("click", () => {
-          if (button.dataset.planKey === this.planKey()) this.openPlan();
+          this.openPlan(button.dataset.planKey);
         });
         notice.append(description, button); article.append(notice);
       }

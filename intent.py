@@ -98,14 +98,16 @@ class ApprovedPlan:
 
     @classmethod
     def create(cls, draft, reference_path, approved_at):
-        if (draft.get("plan") is None or draft.get("plan_stale")
-                or draft.get("pending_message_id")):
+        if not draft["plans"]:
             raise ValueError("Resolve the latest review before starting.")
-        plan = validate_plan(draft["plan"])
+        proposal = draft["plans"][-1]
+        plan = validate_plan(proposal["plan"])
         with Image.open(reference_path) as image:
-            if list(image.size) != [draft["width"], draft["height"]]:
+            if list(image.size) != [proposal["width"], proposal["height"]]:
                 raise ValueError("The reference image dimensions have changed. Review again.")
-        data = {key: draft[key] for key in ("id", "revision", "request", "width", "height", "reference_at")}
+        data = {key: draft[key] for key in ("id", "revision", "request")}
+        data.update({key: proposal[key] for key in ("width", "height", "reference_at")})
+        data["plan_id"] = proposal["id"]
         data.update(plan=plan, approved_at=approved_at)
         if "source" in draft:
             data["source"] = draft["source"]

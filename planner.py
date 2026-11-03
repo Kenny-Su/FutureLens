@@ -14,6 +14,7 @@ PLANNER_DEVELOPER_INSTRUCTIONS = """Work with the photographer to establish a sh
 Use the conversation to explore and clarify preferences, highlighting regions when useful. Propose a plan only when you have the information needed to define which moments qualify.
 The plan is a self-contained final specification: include the agreed shooting requirements, without conversation history, exploratory suggestions, or unrequested preferences.
 The monitor sees only the approved plan and one current preview. Choose any planning reference photo and regions the plan needs, and explain their purpose; conversational highlights are not automatically part of the plan.
+The latest proposed plan remains current during conversation. Propose a new version when the requested changes are clear.
 Only the photographer can authorize monitoring."""
 
 PROPOSE_PLAN = {
@@ -66,7 +67,8 @@ def review_intent(request_text, image, config, *, conversation=None, previous_pl
                   highlights=None, on_highlight):
     image = model_image(image)
     payload = make_planning_payload(request_text, image, conversation,
-                                   {"previous_plan": previous_plan, "available_photo": "reference.jpg",
+                                   {"previous_plan": previous_plan,
+                                    "available_photo": "reference.jpg",
                                     "reference": "NEW reference image" if reference_changed else "CURRENT saved reference image"})
     highlights = highlights or []
     tool_turn = []

@@ -318,7 +318,7 @@ function renderMonitor() {
   $("stop").disabled = stopping || pending || !connected;
   show("new-session", !active);
   text("active-instruction", report.approval?.plan.instructions ||
-    (state.intent?.status === "approved" ? state.intent.plan?.instructions : "") || report.request || state.intent?.request || "");
+    (state.intent?.status === "approved" ? state.intent.plans.at(-1)?.plan.instructions : "") || report.request || state.intent?.request || "");
   show("active-plan-reference", Boolean(report.approval?.plan.reference));
   renderPlanReference($("active-reference"), report.approval?.plan, report.approval?.plan.reference?.photo ? media(report.approval.plan.reference.photo) : "");
   text("interval-label", demo ? "Sample every" : "Every");

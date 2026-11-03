@@ -55,12 +55,13 @@
       <h2 id="plan-title">Your shooting plan</h2>
       <p id="plan-instructions"></p>
       <div id="plan-reference" class="plan-reference" hidden></div>
-          <div class="schedule-controls" role="group" aria-label="Monitoring timing">
+          <div id="plan-timing" class="schedule-controls" role="group" aria-label="Monitoring timing">
             <label for="start-delay" class="camera-only">Start after <span class="schedule-input"><input id="start-delay" type="number" min="0" max="1440" step="1" value="0" required><span>minutes</span></span></label>
             <label for="check-interval"><span class="camera-only">Check every</span><span class="demo-only">Sample every</span> <span class="schedule-input"><input id="check-interval" type="number" min="1" max="86400" step="1" value="60" required><span>seconds</span></span></label>
           </div>
-      <p class="demo-only muted small">Video seconds between previews. Each decision finishes before the video advances.</p>
+      <p id="plan-timing-note" class="demo-only muted small">Video seconds between previews. Each decision finishes before the video advances.</p>
       <div class="plan-actions">
+        <button id="plan-close" class="button secondary" type="button" hidden>Close</button>
         <button id="plan-edit" class="button secondary" type="button" autofocus>Request edits</button>
         <button id="intent-start" class="button primary" type="button" disabled>Confirm and start</button>
       </div>
