@@ -72,7 +72,7 @@ class Monitor:
     def expired(self, preview):
         if self.stop_event is not None and self.stop_event.is_set():
             return "user_stop"
-        if time.monotonic() - preview.received_at >= self.settings.max_frame_age:
+        if not isinstance(self.camera, VideoCamera) and time.monotonic() - preview.received_at >= self.settings.max_frame_age:
             return "stale_preview"
         return None
 
@@ -94,7 +94,8 @@ class Monitor:
 
             # Writing the request and camera preparation can consume the remaining allowance.
             reason = self.expired(preview)
-            remaining = preview.received_at + self.settings.max_frame_age - time.monotonic()
+            remaining = (self.settings.max_frame_age if isinstance(self.camera, VideoCamera) else
+                         preview.received_at + self.settings.max_frame_age - time.monotonic())
             if reason == "user_stop":
                 entry["capture_status"] = "skipped_user_stop"
             elif reason or remaining <= 0:
@@ -202,8 +203,6 @@ class Monitor:
                 now = time.monotonic()
                 if now < next_sample:
                     delay = next_sample - now
-                    if video:
-                        delay = min(delay, self.camera.remaining_seconds)
                     if self.stop_event is None:
                         time.sleep(delay)
                     else:
@@ -235,13 +234,10 @@ class Monitor:
                         entry.update(run_status="failed", outcome="error")
                     raise
                 check_stop(self.stop_event)
-                if video and self.camera.remaining_seconds <= 0:
-                    self.report.update(status="completed", stop_reason="video_end")
-                    break
-                check_stop(self.stop_event)
-                next_sample = max(time.monotonic(), preview.received_at + self.settings.interval_s)
                 if video:
-                    next_sample = min(next_sample, self.camera.started + video.duration)
+                    self.camera.position += self.settings.interval_s
+                    continue
+                next_sample = max(time.monotonic(), preview.received_at + self.settings.interval_s)
                 self.report.update(phase="waiting", next_observation_at=time.time() + max(0, next_sample - time.monotonic()))
                 self.publish()
         self.publish()

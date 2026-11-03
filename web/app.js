@@ -3,6 +3,8 @@ import { drawOverlay, svgNode, annotationTargets, observationText } from "./inte
 import { IntentReview } from "./review.js";
 
 const $ = (id) => document.getElementById(id);
+const demoMode = document.documentElement.dataset.mode === "demo";
+if (demoMode) document.title = "WaitLess · Demo";
 const phases = { connecting: "Connecting to camera…", observing: "Saving a fresh preview…", thinking: "Evaluating the scene…", capturing: "Taking a photo…", waiting: "Waiting for the next observation" };
 const reasons = {
   user_stop: "You stopped this session. All saved previews and photos are preserved.",
@@ -136,7 +138,7 @@ function renderCameraStatus() {
   text("camera-status", !connected ? "Connection lost" : state.operation === "import" ? "Importing video…"
     : connecting ? "Connecting iPhone…" : disconnecting ? "Disconnecting iPhone…"
     : checking ? demo ? "Loading video…" : "Checking camera…" : error ? demo ? "Check video" : "Check camera"
-    : ready ? demo ? "Demo video ready" : "Camera connected" : demo ? "Demo video" : state.source.id ? "Check camera" : "iPhone disconnected");
+    : ready ? demo ? "Demo video ready" : "Camera connected" : demo ? "Demo video" : state.source.id ? "Check camera" : demoMode ? "Import a video" : "iPhone disconnected");
   $("camera-dot").className = `dot ${healthy ? "ready" : error || !connected ? "error" : ""}`;
   $("check-camera").disabled = pending || !connected || Boolean(state.operation) || !state.source.id;
   $("check-camera").title = demo ? "Refresh the video reference" : healthy ? "Last connection check succeeded. Click to check again." : "Check camera connection";
@@ -147,9 +149,9 @@ function renderCameraStatus() {
   $("source-video").disabled = locked;
   text("source-camera", connecting ? "Connecting iPhone…" : disconnecting ? "Disconnecting iPhone…" : hasIPhone ? "Disconnect iPhone" : "Connect iPhone");
   text("source-video", demo ? "Replace video" : "Import video");
-  text("source-detail", demo ? `${state.source.name} · ${clock(state.source.duration_s)} · Normal speed`
+  text("source-detail", demo ? `${state.source.name} · ${clock(state.source.duration_s)} · Decision-paced`
     : state.source.id ? state.source.name
-    : "iPhone Continuity Camera or video demo");
+    : demoMode ? "Import a video to begin" : "iPhone Continuity Camera");
 }
 
 function element(tag, className, value) {
@@ -202,7 +204,7 @@ function renderPreview(row, item) {
   const entry = item.entry;
   if (!row.firstChild) {
     const surface = element("div", "preview-card");
-    activityHeading(surface, `Preview ${String(entry.frame_id + 1).padStart(2, "0")}`, item);
+    activityHeading(surface, entry.video_position_s !== undefined ? `Video · ${clock(entry.video_position_s)}` : `Preview ${String(entry.frame_id + 1).padStart(2, "0")}`, item);
     const button = element("button", "preview-button");
     button.type = "button";
     button.setAttribute("aria-label", `Enlarge observation ${entry.frame_id + 1}`);
@@ -317,6 +319,7 @@ function renderMonitor() {
   show("new-session", !active);
   text("active-instruction", report.intent?.condition ||
     (state.intent?.status === "approved" ? state.intent.condition : "") || report.request || state.intent?.request || "");
+  text("interval-label", demo ? "Sample every" : "Every");
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (scheduled ? demo ? state.source.name : "Camera" : active ? demo ? "Opening video…" : "Connecting…" : "Not connected"));
   text("timeline-empty", demo ? "The first video preview will appear here when monitoring begins." : "The first preview will appear here after the camera connects.");
@@ -347,6 +350,10 @@ function updateClock() {
   } else if (connected && active && !state.stopping && report.phase === "waiting" && report.next_observation_at) {
     const remaining = Math.max(0, report.next_observation_at - Date.now() / 1000);
     next = `Next observation in ${clock(Math.ceil(remaining))}`;
+  }
+  if (demo && report.observations?.length) {
+    const position = report.observations.at(-1).video_position_s;
+    next = `${clock(position)} / ${clock(report.video.duration_s)} · ${next}`;
   }
   text("next-check", next);
 }

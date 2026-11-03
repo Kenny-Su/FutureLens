@@ -55,7 +55,7 @@ class DemoVideo:
 
 
 class VideoCamera:
-    """Review stays at time zero; approved monitoring advances in real time."""
+    """Advance explicitly between decisions; captures preserve the evaluated frame."""
 
     capabilities = {"live_view": True, "capture_ready": True, "preview_issues": [], "capture_issues": []}
 
@@ -65,17 +65,18 @@ class VideoCamera:
         self.model = f"Demo video · {video.name}"
         self.container = None
         self.frame_no = 0
+        self.position = 0
+        self.current_image = None
         self.last_frame_position = self.last_capture_position = None
 
     def __enter__(self):
         self.container = open_video(self.video.path)
         self.stream = self.container.streams.video[0]
-        self.started = time.monotonic()
         return self
 
     @property
     def remaining_seconds(self):
-        return max(0, self.video.duration - (time.monotonic() - self.started))
+        return max(0, self.video.duration - self.position)
 
     def _frame_at(self, seconds):
         if seconds >= self.video.duration:
@@ -100,8 +101,8 @@ class VideoCamera:
 
     def latest_frame(self):
         requested = time.monotonic()
-        position = requested - self.started if self.enable_capture else 0
-        image, self.last_frame_position = self._frame_at(position)
+        image, self.last_frame_position = self._frame_at(self.position)
+        self.current_image = image
         self.frame_no += 1
         return CameraFrame(image, requested, self.frame_no)
 
@@ -111,7 +112,9 @@ class VideoCamera:
         if type(capture_id) is not int or capture_id < 0 or not math.isfinite(max_delay) or max_delay <= 0:
             raise ValueError("Invalid demo capture request.")
         requested = time.monotonic()
-        image, position = self._frame_at(requested - self.started)
+        image, position = self.current_image, self.last_frame_position
+        if image is None:
+            raise RuntimeError("Read a preview before capturing.")
         if time.monotonic() - requested >= max_delay:
             raise RuntimeError("The demo capture expired before the frame was ready.")
         folder = self.output / f"{capture_id:05d}"

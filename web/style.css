@@ -6,6 +6,7 @@
   font-synthesis:none;
 }
 * { box-sizing:border-box; }
+[data-mode="camera"] .demo-only, [data-mode="demo"] .camera-only { display:none!important; }
 [hidden] { display:none!important; }
 body { margin:0; background:var(--bg); color:var(--text); font-size:14px; line-height:1.6; }
 h1,h2,h3,p { margin:0; }

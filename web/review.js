@@ -5,21 +5,24 @@ export class IntentReview {
   constructor({request, accept, notify, started, cancelled}) {
     Object.assign(this, {request, accept, notify, started, cancelled});
     this.draft = null; this.busy = false;
+    this.demo = document.documentElement.dataset.mode === "demo";
+    this.scheduleKey = this.demo ? "waitless.demo.schedule" : "waitless.schedule";
+    $("check-interval").value = this.demo ? 1 : 60;
     this.messageNodes = new Map();
     this.dialogPlan = null;
     try {
-      const saved = JSON.parse(localStorage.getItem("waitless.schedule"));
+      const saved = JSON.parse(localStorage.getItem(this.scheduleKey));
       if (saved) {
         $("start-delay").value = saved.start_delay_s / 60;
         $("check-interval").value = saved.interval_s;
         if (!this.schedule()) throw new Error("Invalid saved timing");
       }
     } catch {
-      $("start-delay").value = 0; $("check-interval").value = 60;
+      $("start-delay").value = 0; $("check-interval").value = this.demo ? 1 : 60;
     }
     for (const id of ["start-delay", "check-interval"]) $(id).addEventListener("input", () => {
       const timing = this.schedule();
-      if (timing) { try { localStorage.setItem("waitless.schedule", JSON.stringify(timing)); } catch {} }
+      if (timing) { try { localStorage.setItem(this.scheduleKey, JSON.stringify(timing)); } catch {} }
       this.controls();
     });
     $("intent-refresh").addEventListener("click", () => this.draft
@@ -54,7 +57,7 @@ export class IntentReview {
   schedule() {
     const delay = $("start-delay"), interval = $("check-interval");
     if (!delay.validity.valid || !interval.validity.valid) return null;
-    return {start_delay_s: delay.valueAsNumber * 60, interval_s: interval.valueAsNumber};
+    return {start_delay_s: this.demo ? 0 : delay.valueAsNumber * 60, interval_s: interval.valueAsNumber};
   }
   render(state, connected = true, pending = false, hasSource = false) {
     this.connected = connected; this.operation = state.operation; this.pending = pending;
@@ -70,7 +73,7 @@ export class IntentReview {
     $("intent-image").hidden = !preview;
     $("intent-preview-empty").hidden = Boolean(preview);
     $("intent-preview-empty").textContent = state.operation === "connect" ? "Connecting iPhone…" : state.operation === "import" ? "Importing video…" : refreshing
-      ? demo ? "Loading video preview…" : "Connecting to camera…" : "Connect your iPhone or import a video.";
+      ? demo ? "Loading video preview…" : "Connecting to camera…" : this.demo ? "Import a video to begin the demo." : "Connect your iPhone.";
     if (preview && $("intent-image").getAttribute("src") !== preview) $("intent-image").src = preview;
     $("intent-reference-time").textContent = refreshing ? "Refreshing preview…" : reference?.reference_at
       ? `Reference captured ${new Date(reference.reference_at).toLocaleTimeString()}` : preview ? demo ? "Video reference · 00:00" : "Camera preview" : "";

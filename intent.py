@@ -18,13 +18,6 @@ BOX_SCHEMA = {"type": "array", "items": {"type": "number"},
 TARGET_SCHEMA = object_schema({
     "id": {"type": "string"}, "label": {"type": "string"}, "box": BOX_SCHEMA,
 })
-REVIEW_SCHEMA = object_schema({
-    "condition": {"type": "string", "description": "Complete shooting plan when plan_ready is true; otherwise an empty string."},
-    "reply": {"type": "string"},
-    "plan_ready": {"type": "boolean", "description": "True when a complete plan is ready for photographer approval; false while clarifying."},
-    "question": {"type": "string", "description": "Clarification question, or an empty string when none is needed."},
-    "targets": {"type": "array", "items": TARGET_SCHEMA},
-})
 
 
 def text(value, label, limit):
@@ -81,20 +74,6 @@ def validate_review(value, *, width=1, height=1):
     result.update(validate_intent({k: value[k] for k in ("condition", "targets")}, width, height,
                                   allow_empty=not value["plan_ready"]))
     return result
-
-
-def json_response(response):
-    """Read the completed structured planning reply from the Responses API."""
-    if not isinstance(response, dict) or response.get("status") != "completed":
-        raise ValueError("The interpretation was incomplete. Try again.")
-    try:
-        blocks = [block for item in response["output"] if item["type"] == "message"
-                  for block in item["content"]]
-        if not blocks or any(block.get("type") != "output_text" for block in blocks):
-            raise ValueError("Refused or missing interpretation")
-        return json.loads("".join(block["text"] for block in blocks))
-    except (KeyError, TypeError, ValueError):
-        raise ValueError("The interpretation was not valid JSON. Try again.") from None
 
 
 @dataclass(frozen=True)

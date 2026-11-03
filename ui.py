@@ -35,7 +35,8 @@ def session_settings(data):
 class SessionManager:
     """One owner of the camera. UI requests never touch an active capture session."""
 
-    def __init__(self, output_root=ROOT / "outputs"):
+    def __init__(self, output_root=ROOT / "outputs", *, demo=False):
+        self.demo = demo
         self.output_root = Path(output_root).resolve()
         self.lock = threading.Lock()
         self.worker = None
@@ -185,6 +186,14 @@ class SessionManager:
 
     def _interpret(self, generation, draft, config, *, fresh=False):
         folder = self.intent_output
+
+        def highlight(targets):
+            with self.lock:
+                if generation != self.intent_generation:
+                    raise RuntimeError("The planning conversation was cancelled.")
+                draft["targets"] = targets
+                self._save_intent(deepcopy(draft))
+
         try:
             if fresh:
                 frame, model, capabilities = self._preview_frame(folder)
@@ -201,8 +210,9 @@ class SessionManager:
             with Image.open(folder / "reference.jpg") as image:
                 previous = ({k: draft[k] for k in ("condition", "targets", "question")}
                             if draft["condition"] else draft.get("previous_interpretation"))
-                reply = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
-                                      previous=deepcopy(previous), reference_changed=fresh)
+                reply, tool_turn = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
+                                                previous=deepcopy(previous), reference_changed=fresh,
+                                                targets=deepcopy(draft["targets"]), on_highlight=highlight)
             # Validate model output before replacing the current interpretation.
             reply = validate_review(reply)
             plan = {k: reply[k] for k in ("condition", "targets")}
@@ -210,7 +220,7 @@ class SessionManager:
                          error=None, condition_stale=False, pending_message_id=None)
             draft["conversation"].append(self._message("assistant", reply["reply"], condition=reply["condition"],
                                                        question=reply["question"], plan_ready=reply["plan_ready"], targets=deepcopy(reply["targets"]),
-                                                       reference_id=draft["id"], revision=draft["revision"]))
+                                                       reference_id=draft["id"], revision=draft["revision"], tool_turn=tool_turn))
         except Exception as exc:
             draft.update(status="ready" if draft["condition"] else "failed",
                          error=str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__)
@@ -244,9 +254,11 @@ class SessionManager:
 
     def _require_source(self):
         if self.demo_video is None and self.selected_camera is None:
-            raise ValueError("Connect an iPhone with Continuity Camera or import a video first.")
+            raise ValueError("Import a video first." if self.demo else "Connect an iPhone with Continuity Camera first.")
 
     def import_video(self, path, name):
+        if not self.demo:
+            raise ValueError("Video import is available in demo mode only.")
         with self.lock:
             if self.operation is not None:
                 raise ValueError("Wait for the current operation to finish before importing a video.")
@@ -271,6 +283,8 @@ class SessionManager:
                 self.operation = None
 
     def connect_camera(self):
+        if self.demo:
+            raise ValueError("Import a video to use demo mode.")
         with self.lock:
             if self.operation is not None:
                 raise ValueError("Stop the current operation before changing the source.")
@@ -457,8 +471,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/state":
                 self._json(self.server.manager.state())
-            elif path in ("/", "/app.js", "/activity.mjs", "/intent.mjs", "/review.js", "/style.css"):
-                self._file(STATIC / ("index.html" if path == "/" else path[1:]))
+            elif path == "/":
+                page = (STATIC / "index.html").read_text()
+                if self.server.manager.demo:
+                    page = page.replace('data-mode="camera"', 'data-mode="demo"')
+                data = page.encode()
+                self._headers(200, "text/html; charset=utf-8", len(data))
+                self.wfile.write(data)
+            elif path in ("/app.js", "/activity.mjs", "/intent.mjs", "/review.js", "/style.css"):
+                self._file(STATIC / path[1:])
             elif path.startswith("/media/"):
                 _, _, session, name = path.split("/", 3)
                 self._file(self.server.manager.media_file(session, name), download=name.startswith("moments/"))
@@ -512,6 +533,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _import_video(self, length):
+        if not self.server.manager.demo:
+            raise ValueError("Video import is available in demo mode only.")
         if not 0 < length <= MAX_VIDEO_BYTES or self.headers.get_content_type() != "application/octet-stream":
             raise ValueError("Choose a video file up to 2 GB.")
         name = unquote(self.headers.get("X-Video-Name", "video"))
@@ -547,8 +570,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
+    parser.add_argument("--demo", action="store_true", help="Launch the video demo interface")
     args = parser.parse_args()
-    manager = SessionManager()
+    manager = SessionManager(demo=args.demo)
     with LocalServer(("127.0.0.1", args.port), manager) as server:
         url = f"http://127.0.0.1:{server.server_port}"
         print(f"WaitLess: {url}\nKeep this terminal open. Ctrl-C stops monitoring and closes the server.", flush=True)
