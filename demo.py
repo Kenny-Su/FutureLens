@@ -106,17 +106,14 @@ class VideoCamera:
         self.frame_no += 1
         return CameraFrame(image, requested, self.frame_no)
 
-    def capture(self, capture_id, on_shutter=None, max_delay=10):
+    def capture(self, capture_id, on_shutter=None):
         if not self.enable_capture:
             raise RuntimeError("Shutter control is disabled in preview mode")
-        if type(capture_id) is not int or capture_id < 0 or not math.isfinite(max_delay) or max_delay <= 0:
+        if type(capture_id) is not int or capture_id < 0:
             raise ValueError("Invalid demo capture request.")
-        requested = time.monotonic()
         image, position = self.current_image, self.last_frame_position
         if image is None:
             raise RuntimeError("Read a preview before capturing.")
-        if time.monotonic() - requested >= max_delay:
-            raise RuntimeError("The demo capture expired before the frame was ready.")
         folder = self.output / f"{capture_id:05d}"
         self.output.mkdir(parents=True, exist_ok=True)
         folder.mkdir()

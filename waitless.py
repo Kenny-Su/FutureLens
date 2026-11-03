@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-import math
 from pathlib import Path
 from PIL import Image
 import shutil
@@ -27,7 +26,6 @@ CAPTURE_PROBABILITY_THRESHOLD = 0.90
 @dataclass(frozen=True)
 class SessionSettings:
     request: str
-    max_frame_age: float = 30
     interval_s: int = 60
     start_delay_s: int = 0
 
@@ -38,12 +36,6 @@ class SessionSettings:
             value = getattr(self, name)
             if type(value) is not int or not minimum <= value <= 86400:
                 raise ValueError(f"{name} must be whole seconds from {minimum} to 86400.")
-        try:
-            valid = type(self.max_frame_age) in (int, float) and math.isfinite(self.max_frame_age)
-        except OverflowError:
-            valid = False
-        if not valid or self.max_frame_age <= 0:
-            raise ValueError("Max frame age must be a finite, positive number.")
 
 
 def write_json(path: Path, value: object) -> None:
@@ -71,58 +63,35 @@ class Monitor:
     def publish(self):
         write_json(self.output / "results.json", self.report)
 
-    def expired(self, preview):
-        if self.stop_event is not None and self.stop_event.is_set():
-            return "user_stop"
-        if not isinstance(self.camera, VideoCamera) and time.monotonic() - preview.received_at >= self.settings.max_frame_age:
-            return "stale_preview"
-        return None
-
     def shoot(self, preview, entry, journal, call_id):
-        reason = self.expired(preview)
-        statuses = {"user_stop": "skipped_user_stop", "stale_preview": "skipped_stale_frame"}
-        if reason:
-            entry["capture_status"] = statuses[reason]
-        elif entry["assessment"]["condition"] != "met":
-            entry["capture_status"] = "skipped_condition_unmet"
-        else:
-            entry.update(capture_status="requested", capture_id=self.report["photos_taken"])
-            self.report["phase"] = "capturing"
-            journal.event("capture", "started", call_id + ":capture", capture_status="requested")
+        entry.update(capture_status="requested", capture_id=self.report["photos_taken"])
+        self.report["phase"] = "capturing"
+        journal.event("capture", "started", call_id + ":capture", capture_status="requested")
 
-            def on_shutter():
-                entry.update(capture_status="shutter_sent", shutter_sent_at=datetime.now(timezone.utc).isoformat())
-                journal.event("capture", "started", call_id + ":capture", capture_status="shutter_sent")
+        def on_shutter():
+            entry.update(capture_status="shutter_sent", shutter_sent_at=datetime.now(timezone.utc).isoformat())
+            journal.event("capture", "started", call_id + ":capture", capture_status="shutter_sent")
 
-            # Writing the request and camera preparation can consume the remaining allowance.
-            reason = self.expired(preview)
-            remaining = (self.settings.max_frame_age if isinstance(self.camera, VideoCamera) else
-                         preview.received_at + self.settings.max_frame_age - time.monotonic())
-            if reason == "user_stop":
-                entry["capture_status"] = "skipped_user_stop"
-            elif reason or remaining <= 0:
-                entry["capture_status"] = "skipped_expired_before_shutter"
-            else:
-                try:
-                    files = self.camera.capture(entry["capture_id"], on_shutter=on_shutter, max_delay=remaining)
-                except VideoEnded:
-                    entry["capture_status"] = "skipped_video_end"
-                except (RuntimeError, OSError, KeyboardInterrupt):
-                    entry["capture_status"] = ("failed_after_shutter" if entry["capture_status"] == "shutter_sent"
-                                               else "failed_or_unconfirmed")
-                    journal.event("capture", "failed", call_id + ":capture", **capture_outcome(entry))
-                    raise
-                else:
-                    entry.update(capture_status="downloaded", saved_files=[str(p.relative_to(self.output)) for p in files])
-                    if isinstance(self.camera, VideoCamera):
-                        entry["video_capture_position_s"] = self.camera.last_capture_position
-                    elif isinstance(self.camera, MacCamera):
-                        entry["capture_image"] = self.camera.last_capture_info
-                    self.report["photos_taken"] += 1
-                    self.archive.record_capture(entry["capture_id"], preview, files)
-        journal.event("capture", "completed" if entry["capture_status"] == "downloaded" else "skipped",
-                      call_id + ":capture", **capture_outcome(entry))
-        return capture_outcome(entry)
+        try:
+            check_stop(self.stop_event)
+            files = self.camera.capture(entry["capture_id"], on_shutter=on_shutter)
+        except SessionStopped:
+            entry["capture_status"] = "skipped_user_stop"
+            journal.event("capture", "skipped", call_id + ":capture", **capture_outcome(entry))
+            raise
+        except (RuntimeError, OSError, KeyboardInterrupt):
+            entry["capture_status"] = ("failed_after_shutter" if entry["capture_status"] == "shutter_sent"
+                                       else "failed_or_unconfirmed")
+            journal.event("capture", "failed", call_id + ":capture", **capture_outcome(entry))
+            raise
+        entry.update(capture_status="downloaded", saved_files=[str(p.relative_to(self.output)) for p in files])
+        if isinstance(self.camera, VideoCamera):
+            entry["video_capture_position_s"] = self.camera.last_capture_position
+        elif isinstance(self.camera, MacCamera):
+            entry["capture_image"] = self.camera.last_capture_info
+        self.report["photos_taken"] += 1
+        self.archive.record_capture(entry["capture_id"], preview, files)
+        journal.event("capture", "completed", call_id + ":capture", **capture_outcome(entry))
 
     def observe(self, preview, entry):
         journal = ObservationJournal(self.output, preview, entry, self.publish)
@@ -131,9 +100,6 @@ class Monitor:
         entry.update(assessment=None, assessment_status="pending")
         journal.event("run", "started", "run", outcome="saved")
         try:
-            outcome = self.expired(preview)
-            if outcome:
-                return
             current_image = model_image(preview.image())
             if self.plan["reference"] is not None:
                 with Image.open(self.output / self.plan["reference"]["photo"]) as reference:
@@ -144,30 +110,23 @@ class Monitor:
                 text_content({"plan": self.plan, "frame_id": preview.id,
                               "intent_revision": self.approval["revision"]}),
                 {"type": "image", "file": str(preview.path.relative_to(self.output))}]})
-            outcome = self.expired(preview)
-            if outcome:
-                return
             self.report["phase"] = "thinking"
             self.publish()
-            outcome = self.expired(preview)
-            if outcome:
-                return
+            check_stop(self.stop_event)
             active = True
             journal.event("model", "started", "model:1", turn=1)
             self.report["api_requests"] += 1
             entry["model_calls"] += 1
             entry["run_status"] = "evaluating"
             before = time.monotonic()
-            response = evaluate_preview(payload, self.config, timeout=90)
+            response = evaluate_preview(payload, self.config)
             probability = decision_probability(response)
             condition = "met" if probability >= CAPTURE_PROBABILITY_THRESHOLD else "unmet"
             journal.message({"role": "assistant", "content": [text_content(response)]})
             entry["usage"] = response_usage(response)
             journal.event("model", "completed", "model:1", turn=1, latency_s=time.monotonic() - before)
             active = False
-            outcome = self.expired(preview)
-            if outcome:
-                return
+            check_stop(self.stop_event)
             entry.update(assessment={"frame_id": preview.id, "intent_revision": self.approval["revision"],
                                      "condition": condition, "probability": probability,
                                      "threshold": CAPTURE_PROBABILITY_THRESHOLD}, assessment_status="available")
@@ -176,6 +135,9 @@ class Monitor:
             else:
                 self.shoot(preview, entry, journal, f"frame:{preview.id}")
                 outcome = entry["capture_status"]
+        except SessionStopped:
+            outcome = "user_stop"
+            raise
         except BaseException:
             outcome = "error"
             entry["run_status"] = "failed"
@@ -187,7 +149,7 @@ class Monitor:
                 entry["assessment_status"] = "unavailable"
             if entry["run_status"] != "failed":
                 entry["run_status"] = "finished" if outcome in ("no_photo", "downloaded") else "skipped"
-            entry.update(outcome=outcome, frame_age_s=time.monotonic() - preview.received_at)
+            entry["outcome"] = outcome
             journal.event("run", entry["run_status"], "run", outcome=outcome,
                           model_calls=entry["model_calls"], capture_outcome=capture_outcome(entry))
 
@@ -282,7 +244,7 @@ def run_session(settings: SessionSettings, output: Path, *, approved_plan: Appro
         "instructions": MONITOR_QUESTION_INSTRUCTIONS, "request": settings.request,
         "source": f"video:{video.name}" if video else "continuity:iphone", "created_at": datetime.now(timezone.utc).isoformat(),
         "settings": {key: getattr(settings, key) for key in
-                     ("max_frame_age", "interval_s", "start_delay_s")},
+                     ("interval_s", "start_delay_s")},
         "current_interval_s": settings.interval_s,
         "observations": [], "previews_saved": 0, "photos_taken": 0,
         "api_requests": 0,

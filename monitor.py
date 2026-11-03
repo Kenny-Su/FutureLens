@@ -36,5 +36,5 @@ def decision_probability(response):
     return answers[0]["probability"]
 
 
-def evaluate_preview(payload, config, *, timeout=90):
-    return post_json(DECISIONS_ENDPOINT, payload, config, timeout)
+def evaluate_preview(payload, config):
+    return post_json(DECISIONS_ENDPOINT, payload, config)

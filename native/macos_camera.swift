@@ -21,9 +21,7 @@ func authorize() throws {
     if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
         let answered = DispatchSemaphore(value: 0)
         AVCaptureDevice.requestAccess(for: .video) { _ in answered.signal() }
-        guard answered.wait(timeout: .now() + 90) == .success else {
-            throw CameraFailure(message: "Allow WaitLess Camera to access your camera, then try again.")
-        }
+        answered.wait()
     }
     guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
         throw CameraFailure(message: "Allow WaitLess Camera in System Settings → Privacy & Security → Camera, then try again.")
@@ -121,14 +119,13 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
         condition.signal()
     }
 
-    func frame(timeout: Double) throws -> Data {
+    func frame() throws -> Data {
         orient(videoOutput)
         condition.lock()
         pendingFrame = nil
         requestedAfter = CMClockGetTime(CMClockGetHostTimeClock())
-        let deadline = Date(timeIntervalSinceNow: timeout)
         while pendingFrame == nil && failure == nil {
-            if !condition.wait(until: deadline) { break }
+            condition.wait()
         }
         let buffer = pendingFrame
         let error = failure
@@ -146,8 +143,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
         return jpeg
     }
 
-    func photo(timeout: Double) throws -> Data {
-        let deadline = Date(timeIntervalSinceNow: timeout)
+    func photo() throws -> Data {
         orient(photoOutput)
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.isHighResolutionPhotoEnabled = true
@@ -161,22 +157,19 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
         photoComplete = false
         condition.unlock()
         if let error { throw CameraFailure(message: error) }
-        guard session.isRunning && Date() < deadline else { throw CameraFailure(message: "The photo request expired before capture.") }
+        guard session.isRunning else { throw CameraFailure(message: "The camera session is not running.") }
         try emit(["event": "shutter"])
         photoOutput.capturePhoto(with: settings, delegate: self)
-        // Once triggered, allow Apple's photo processing to finish even if the preview expires.
         condition.lock()
-        let processingDeadline = Date(timeIntervalSinceNow: 90)
         while !photoComplete && failure == nil {
-            if !condition.wait(until: processingDeadline) { break }
+            condition.wait()
         }
         let data = photoData
         let captureError = failure ?? photoError
-        let complete = photoComplete
         photoID = nil
         condition.unlock()
         if let captureError { throw CameraFailure(message: captureError) }
-        guard complete, let data else { throw CameraFailure(message: "The iPhone did not finish processing the photo. Capture is unconfirmed; no automatic retry.") }
+        guard let data else { throw CameraFailure(message: "The iPhone did not finish processing the photo. Capture is unconfirmed; no automatic retry.") }
         return data
     }
 
@@ -223,21 +216,17 @@ func run() throws {
     defer { camera.close() }
     camera.session.startRunning()
     guard camera.session.isRunning else { throw CameraFailure(message: "Could not start iPhone Continuity Camera.") }
-    _ = try camera.frame(timeout: 15)
+    _ = try camera.frame()
     try emit(["event": "ready", "model": device.localizedName, "device_id": device.uniqueID,
               "capture_kind": "photo", "high_resolution": camera.photoOutput.isHighResolutionCaptureEnabled,
               "quality_prioritization": "quality"])
     while let line = readLine() {
         if line == "QUIT" { return }
-        let parts = line.split(separator: " ")
-        guard parts.count == 2, let timeout = Double(parts[1]), timeout.isFinite, timeout > 0, timeout <= 20 else {
-            throw CameraFailure(message: "Invalid camera request.")
-        }
-        if parts[0] == "FRAME" {
-            let data = try camera.frame(timeout: timeout)
+        if line == "FRAME" {
+            let data = try camera.frame()
             try emit(["event": "frame", "bytes": data.count, "frame_no": camera.frameNumber], image: data)
-        } else if parts[0] == "PHOTO" && allowCapture {
-            let data = try camera.photo(timeout: timeout)
+        } else if line == "PHOTO" && allowCapture {
+            let data = try camera.photo()
             try emit(["event": "photo", "bytes": data.count], image: data)
         } else { throw CameraFailure(message: "Still-photo capture is disabled in preview mode.") }
     }

@@ -130,7 +130,7 @@ def api_error(exc: error.HTTPError) -> ApiError:
     return ApiError(details)
 
 
-def post_json(endpoint: str, payload: dict, config: ApiConfig, timeout: float = 90) -> dict:
+def post_json(endpoint: str, payload: dict, config: ApiConfig) -> dict:
     validate_config(config)
     headers = {"Content-Type": "application/json", "Accept": "application/json",
                "User-Agent": "WaitLess", "Authorization": "Bearer " + config.api_key}
@@ -138,7 +138,7 @@ def post_json(endpoint: str, payload: dict, config: ApiConfig, timeout: float = 
         headers["OpenAI-Project"] = config.project_id
     req = request.Request(endpoint, data=encode_payload(payload), headers=headers, method="POST")
     try:
-        with request.build_opener(NoRedirect()).open(req, timeout=timeout) as response:
+        with request.build_opener(NoRedirect()).open(req, timeout=None) as response:
             return json.load(response)
     except error.HTTPError as exc:
         raise api_error(exc) from None

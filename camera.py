@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 import io
 import json
-import math
 from pathlib import Path
 import platform
 import queue
@@ -48,10 +47,8 @@ def camera_helper():
 
 def list_cameras():
     try:
-        result = subprocess.run([str(camera_helper()), "--list"], capture_output=True, timeout=100)
+        result = subprocess.run([str(camera_helper()), "--list"], capture_output=True)
         event = json.loads(result.stdout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Camera permission is waiting. Allow access and try Connect iPhone again.") from None
     except (OSError, ValueError):
         raise RuntimeError("Could not list macOS cameras. Check camera access in System Settings.") from None
     if event.get("event") == "error":
@@ -138,11 +135,8 @@ class MacCamera:
                 self._failed("iPhone camera connection ended; see camera.log")
             self.events.put({"event": "error", "message": "Camera input exited; see camera.log"})
 
-    def _receive(self, expected, timeout=20):
-        try:
-            event = self.events.get(timeout=timeout)
-        except queue.Empty:
-            raise RuntimeError("Camera helper timed out; no automatic capture retry") from None
+    def _receive(self, expected):
+        event = self.events.get()
         if event.get("event") == "error":
             raise RuntimeError(event.get("message", "Camera helper failed"))
         if event.get("event") != expected:
@@ -168,7 +162,7 @@ class MacCamera:
                                             stderr=self.log, start_new_session=True)
             self.reader = threading.Thread(target=self._read_output, daemon=True)
             self.reader.start()
-            self._accept_camera(self._receive("ready", timeout=100))
+            self._accept_camera(self._receive("ready"))
             return self
         except BaseException as exc:
             self.close()
@@ -176,32 +170,26 @@ class MacCamera:
                 raise CameraError(str(exc), self.model, self.capabilities) from None
             raise
 
-    def _frame(self, timeout=15):
-        requested_at = time.monotonic()
-        self._send(f"FRAME {timeout:.6f}")
-        event = self._receive("frame", timeout=timeout + 5)
-        return event, requested_at
-
     def latest_frame(self):
-        event, requested_at = self._frame()
+        requested_at = time.monotonic()
+        self._send("FRAME")
+        event = self._receive("frame")
         with Image.open(io.BytesIO(event["data"])) as image:
             frame = ImageOps.exif_transpose(image).convert("RGB")
         return CameraFrame(frame, requested_at, event["frame_no"])
 
-    def capture(self, capture_id: int, on_shutter=None, max_delay=10):
+    def capture(self, capture_id: int, on_shutter=None):
         if not self.enable_capture:
             raise RuntimeError("Still-photo capture is disabled in preview mode")
         if type(capture_id) is not int or capture_id < 0:
             raise ValueError("Capture ID must be a non-negative integer")
-        if not math.isfinite(max_delay) or max_delay <= 0:
-            raise ValueError("Capture expiry must be finite and positive")
         if self.stop_event is not None and self.stop_event.is_set():
             raise RuntimeError("Session stopped before capture")
-        self._send(f"PHOTO {min(max_delay, 20):.6f}")
-        self._receive("shutter", timeout=min(max_delay, 20) + 2)
+        self._send("PHOTO")
+        self._receive("shutter")
         if on_shutter:
             on_shutter()
-        event = self._receive("photo", timeout=95)
+        event = self._receive("photo")
         with Image.open(io.BytesIO(event["data"])) as image:
             if image.format != "JPEG":
                 raise RuntimeError("The iPhone returned an unexpected photo format")
