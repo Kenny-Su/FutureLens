@@ -6,9 +6,11 @@ export function targetColor(id) {
   return colors[hash % colors.length];
 }
 export function validPlan(plan) {
-  if (!plan.condition.trim() || plan.condition.length > 8000) return "Describe the capture condition.";
-  if (!Array.isArray(plan.targets) || plan.targets.length > 24) return "Use up to 24 optional highlights.";
-  for (const t of plan.targets) {
+  if (!plan?.instructions?.trim() || plan.instructions.length > 8000) return "Describe the capture condition.";
+  if (plan.reference === null) return "";
+  if (!plan.reference?.photo || !plan.reference.purpose?.trim()) return "Describe the reference photo’s purpose.";
+  if (!Array.isArray(plan.reference.regions) || plan.reference.regions.length > 24) return "Use up to 24 optional highlights.";
+  for (const t of plan.reference.regions) {
     if (!t.label.trim()) return "Give every object a name.";
     if (!Array.isArray(t.box) || (t.box.length !== 4 || !t.box.every(Number.isFinite) || t.box[0] < 0 || t.box[1] < 0 ||
       t.box[2] > 1 || t.box[3] > 1 || t.box[0] >= t.box[2] || t.box[1] >= t.box[3])) return "Keep boxes inside the image.";
@@ -72,4 +74,19 @@ export function observationText(entry, intent) {
   }
   const missing = annotationTargets(entry, intent).filter(t => t.status !== "visible").map(t => `${t.label}: ${t.status}`);
   return [states[snapshot.condition], decision, ...missing].filter(Boolean).join(" · ");
+}
+
+export function renderPlanReference(container, plan, source) {
+  container.hidden = !plan?.reference;
+  if (container.hidden) { container.replaceChildren(); delete container.dataset.key; return; }
+  const key = JSON.stringify([source, plan.reference]);
+  if (container.dataset.key === key) return;
+  container.dataset.key = key;
+  const purpose = document.createElement("p"); purpose.textContent = plan.reference.purpose;
+  const surface = document.createElement("div"); surface.className = "image-surface";
+  const image = document.createElement("img"); image.alt = "Plan reference photo";
+  const overlay = svgNode("svg", {class: "intent-overlay", role: "img", "aria-label": plan.reference.regions.map(t => t.label).join(", ") || "No highlighted regions"});
+  image.addEventListener("load", () => drawOverlay(overlay, plan.reference.regions, image.naturalWidth, image.naturalHeight));
+  image.src = source;
+  surface.append(image, overlay); container.replaceChildren(surface, purpose);
 }

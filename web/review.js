@@ -1,4 +1,4 @@
-import {drawOverlay, validPlan} from "./intent.mjs";
+import {drawOverlay, validPlan, renderPlanReference} from "./intent.mjs";
 
 const $ = id => document.getElementById(id);
 export class IntentReview {
@@ -78,10 +78,10 @@ export class IntentReview {
     $("intent-reference-time").textContent = refreshing ? "Refreshing preview…" : reference?.reference_at
       ? `Reference captured ${new Date(reference.reference_at).toLocaleTimeString()}` : preview ? demo ? "Video reference · 00:00" : "Camera preview" : "";
     if (draft?.width && draft.height) {
-      drawOverlay($("intent-overlay"), draft.targets, draft.width, draft.height);
-      $("intent-overlay").setAttribute("aria-label", `AI highlights: ${draft.targets.map(t => t.label).join(", ")}`);
+      drawOverlay($("intent-overlay"), draft.highlights, draft.width, draft.height);
+      $("intent-overlay").setAttribute("aria-label", `AI highlights: ${draft.highlights.map(t => t.label).join(", ")}`);
     }
-    $("intent-overlay").toggleAttribute("hidden", !draft?.targets.length);
+    $("intent-overlay").toggleAttribute("hidden", !draft?.highlights.length);
     $("return-session").hidden = Boolean(draft) || !state.session_id;
     this.conversation(); this.controls();
   }
@@ -100,8 +100,8 @@ export class IntentReview {
     $("start-delay").disabled = locked;
     $("check-interval").disabled = locked;
     $("intent-start").textContent = timing?.start_delay_s ? "Confirm and schedule" : "Confirm and start";
-    $("intent-start").disabled = !active || !this.hasSource || !this.draft.plan_ready || this.draft.condition_stale ||
-      Boolean(this.draft.pending_message_id || message || validPlan(this.draft)) || !timing;
+    $("intent-start").disabled = !active || !this.hasSource || !this.draft.plan || this.draft.plan_stale ||
+      Boolean(this.draft.pending_message_id || message || validPlan(this.draft.plan)) || !timing;
     $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
     const sendLabel = !message && retry ? "Retry reply" : "Send message";
     $("intent-refine").setAttribute("aria-label", sendLabel);
@@ -111,7 +111,7 @@ export class IntentReview {
     $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
     const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;
-    const ready = Boolean(this.draft?.plan_ready && !this.draft.condition_stale && !this.draft.pending_message_id);
+    const ready = Boolean(this.draft?.plan && !this.draft.plan_stale && !this.draft.pending_message_id);
     this.canReviewPlan = ready && active && !message && this.hasSource;
     for (const button of $("review-messages").querySelectorAll(".review-plan-button")) {
       const current = button.dataset.planKey === this.planKey();
@@ -130,7 +130,8 @@ export class IntentReview {
   openPlan() {
     if (!this.canReviewPlan) return;
     this.dialogPlan = this.planKey();
-    $("plan-condition").textContent = this.draft.condition;
+    $("plan-instructions").textContent = this.draft.plan.instructions;
+    renderPlanReference($("plan-reference"), this.draft.plan, this.draft.preview);
     if (!$("plan-dialog").open) $("plan-dialog").showModal();
   }
   conversation() {
@@ -146,7 +147,7 @@ export class IntentReview {
       author.textContent = turn.role === "user" ? "You" : "WaitLess";
       const body = document.createElement("p"); body.className = "message-text"; body.textContent = turn.text;
       article.append(author, body);
-      if (turn.role === "assistant" && turn.plan_ready) {
+      if (turn.role === "assistant" && turn.plan) {
         const notice = document.createElement("div"); notice.className = "plan-ready-notice";
         const description = document.createElement("p");
         description.textContent = "Your shooting plan is ready, waiting for your approval.";

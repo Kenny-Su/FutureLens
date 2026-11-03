@@ -1,5 +1,5 @@
 import { sessionActivity } from "./activity.mjs";
-import { drawOverlay, svgNode, annotationTargets, observationText } from "./intent.mjs";
+import { drawOverlay, svgNode, annotationTargets, observationText, renderPlanReference } from "./intent.mjs";
 import { IntentReview } from "./review.js";
 
 const $ = (id) => document.getElementById(id);
@@ -184,10 +184,10 @@ function openImage(id) {
   loadPreview($("viewer-image"), media(entry.preview_file));
   $("viewer-image").alt = `Observation ${id + 1} at ${clock(entry.timestamp_s)} into the session`;
   downloads($("viewer-downloads"), entry);
-  const targets = annotationTargets(entry, state.report?.intent);
+  const targets = annotationTargets(entry, state.report?.approval);
   drawOverlay($("viewer-overlay"), targets, entry.width, entry.height);
   $("viewer-overlay").toggleAttribute("hidden", !targets.length || !$("show-highlights").checked);
-  text("viewer-annotations", observationText(entry, state.report?.intent));
+  text("viewer-annotations", observationText(entry, state.report?.approval));
   if (!$("image-viewer").open) $("image-viewer").showModal();
 }
 function activityHeading(surface, label, item) {
@@ -221,10 +221,10 @@ function renderPreview(row, item) {
   row.classList.toggle("captured", captured(entry));
   row.querySelector(".saved-marker").hidden = !captured(entry);
   const overlay = row.querySelector("svg");
-  const targets = annotationTargets(entry, state.report?.intent);
+  const targets = annotationTargets(entry, state.report?.approval);
   drawOverlay(overlay, targets, entry.width, entry.height);
   overlay.toggleAttribute("hidden", !targets.length || !$("show-highlights").checked);
-  row.querySelector(".preview-annotations").textContent = observationText(entry, state.report?.intent);
+  row.querySelector(".preview-annotations").textContent = observationText(entry, state.report?.approval);
 }
 function renderAction(row, item) {
   if (row.dataset.revision === item.revision) return;
@@ -317,8 +317,10 @@ function renderMonitor() {
   show("stop", active);
   $("stop").disabled = stopping || pending || !connected;
   show("new-session", !active);
-  text("active-instruction", report.intent?.condition ||
-    (state.intent?.status === "approved" ? state.intent.condition : "") || report.request || state.intent?.request || "");
+  text("active-instruction", report.approval?.plan.instructions ||
+    (state.intent?.status === "approved" ? state.intent.plan?.instructions : "") || report.request || state.intent?.request || "");
+  show("active-plan-reference", Boolean(report.approval?.plan.reference));
+  renderPlanReference($("active-reference"), report.approval?.plan, report.approval?.plan.reference?.photo ? media(report.approval.plan.reference.photo) : "");
   text("interval-label", demo ? "Sample every" : "Every");
   text("active-interval", `${report.current_interval_s ?? 60} sec`);
   text("active-camera", report.camera_model || (scheduled ? demo ? state.source.name : "Camera" : active ? demo ? "Opening video…" : "Connecting…" : "Not connected"));
@@ -367,7 +369,7 @@ function render() {
   review.render(state, connected, pending, Boolean(state.source.id));
   if (showingMonitor && !reviewing) {
     renderMonitor();
-    const intent = state.report?.intent;
+    const intent = state.report?.approval;
     show("highlight-control", entries().some(entry => annotationTargets(entry, intent).length));
     if ($("image-viewer").open && viewerFrameId !== null) openImage(viewerFrameId);
   }

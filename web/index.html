@@ -51,9 +51,10 @@
       </div>
     </section>
 
-    <dialog id="plan-dialog" aria-labelledby="plan-title" aria-describedby="plan-condition">
+    <dialog id="plan-dialog" aria-labelledby="plan-title" aria-describedby="plan-instructions">
       <h2 id="plan-title">Your shooting plan</h2>
-      <p id="plan-condition"></p>
+      <p id="plan-instructions"></p>
+      <div id="plan-reference" class="plan-reference" hidden></div>
           <div class="schedule-controls" role="group" aria-label="Monitoring timing">
             <label for="start-delay" class="camera-only">Start after <span class="schedule-input"><input id="start-delay" type="number" min="0" max="1440" step="1" value="0" required><span>minutes</span></span></label>
             <label for="check-interval"><span class="camera-only">Check every</span><span class="demo-only">Sample every</span> <span class="schedule-input"><input id="check-interval" type="number" min="1" max="86400" step="1" value="60" required><span>seconds</span></span></label>
@@ -75,6 +76,7 @@
         <div class="session-metrics">
           <div class="metric"><span>Photos saved</span><strong id="shot-count">0</strong></div>
         </div>
+        <details id="active-plan-reference" hidden><summary>Plan reference</summary><div id="active-reference" class="plan-reference" hidden></div></details>
         <div class="session-timing"><span id="next-check">Connecting to camera…</span><span>Elapsed <span id="elapsed" class="mono">00:00</span></span></div>
         <p id="session-detail" class="muted small"></p>
         <p id="output-path" class="output-path"></p>

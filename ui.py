@@ -19,7 +19,7 @@ from demo import DemoVideo, VideoCamera
 from waitless import SessionSettings, run_session, write_json
 from openai_client import load_config, validate_config, model_image
 from planner import review_intent
-from intent import ApprovedIntent, validate_review
+from intent import ApprovedPlan, validate_review
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "web"
@@ -72,7 +72,7 @@ class SessionManager:
                 raise ValueError("A camera operation is already running.")
             draft = self._draft(data)
             if (set(data) - {"intent_id", "revision", "interval_s", "start_delay_s"} or draft["status"] != "ready"
-                    or draft.get("plan_ready") is not True or draft.get("condition_stale")
+                    or draft.get("plan") is None or draft.get("plan_stale")
                     or draft.get("pending_message_id")):
                 raise ValueError("Review the current interpretation before starting.")
             output = self._folder("session")
@@ -80,7 +80,7 @@ class SessionManager:
                 **{key: data[key] for key in ("interval_s", "start_delay_s") if key in data}})
             validate_config(load_config())
             self._require_source()
-            approved = ApprovedIntent.create(draft, self.intent_output / "reference.jpg",
+            approved = ApprovedPlan.create(draft, self.intent_output / "reference.jpg",
                                              datetime.now(timezone.utc).isoformat())
             self._save_intent({**draft, "status": "approved", "approved_at": approved.data["approved_at"]})
             self.output, self.error = output, None
@@ -92,7 +92,7 @@ class SessionManager:
         try:
             self._close_preview()
             source = {"video": self.demo_video} if self.demo_video else {"camera_id": self.selected_camera["id"]}
-            run_session(settings, self.output, approved_intent=approved,
+            run_session(settings, self.output, approved_plan=approved,
                         stop_event=self.stop_event, **source)
         except Exception as exc:
             with self.lock:
@@ -143,10 +143,10 @@ class SessionManager:
             conversation.append(message)
             draft = {"id": self.intent_output.name, "revision": 1, "request": settings.request,
                      "source": self.source(),
-                     "status": "preparing", "condition": "", "targets": [], "error": None,
-                     "preview": None, "condition_stale": True, "plan_ready": False,
+                     "status": "preparing", "plan": None, "highlights": [], "error": None,
+                     "preview": None, "plan_stale": True,
                      "conversation": conversation, "pending_message_id": message["id"],
-                     "previous_interpretation": {k: previous[k] for k in ("condition", "targets")} if previous else None}
+                     "previous_plan": deepcopy(previous["plan"]) if previous else None}
             self._save_intent(draft)
             self._launch("intent", lambda: self._interpret(generation, deepcopy(draft), config, fresh=True))
 
@@ -167,7 +167,7 @@ class SessionManager:
             self.intent_generation += 1
             generation = self.intent_generation
             draft = {**draft, "revision": draft["revision"] + 1, "status": "refining", "error": None,
-                     "condition_stale": True, "plan_ready": False}
+                     "plan_stale": True}
             if not retry:
                 message = self._message("user", feedback, reference_id=draft["id"])
                 draft["conversation"] = [*draft["conversation"], message]
@@ -187,11 +187,11 @@ class SessionManager:
     def _interpret(self, generation, draft, config, *, fresh=False):
         folder = self.intent_output
 
-        def highlight(targets):
+        def highlight(regions):
             with self.lock:
                 if generation != self.intent_generation:
                     raise RuntimeError("The planning conversation was cancelled.")
-                draft["targets"] = targets
+                draft["highlights"] = regions
                 self._save_intent(deepcopy(draft))
 
         try:
@@ -208,21 +208,19 @@ class SessionManager:
                         return
                     self._save_intent(deepcopy(draft))
             with Image.open(folder / "reference.jpg") as image:
-                previous = ({k: draft[k] for k in ("condition", "targets")}
-                            if draft["condition"] else draft.get("previous_interpretation"))
+                previous_plan = draft["plan"] or draft.get("previous_plan")
                 reply, tool_turn = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
-                                                previous=deepcopy(previous), reference_changed=fresh,
-                                                targets=deepcopy(draft["targets"]), on_highlight=highlight)
+                                                previous_plan=deepcopy(previous_plan), reference_changed=fresh,
+                                                highlights=deepcopy(draft["highlights"]), on_highlight=highlight)
             # Validate model output before replacing the current interpretation.
             reply = validate_review(reply)
-            plan = {k: reply[k] for k in ("condition", "targets")}
-            draft.update(plan, plan_ready=reply["plan_ready"], status="ready", revision=draft["revision"] + 1,
-                         error=None, condition_stale=False, pending_message_id=None)
-            draft["conversation"].append(self._message("assistant", reply["reply"], condition=reply["condition"],
-                                                       plan_ready=reply["plan_ready"], targets=deepcopy(reply["targets"]),
+            draft.update(plan=reply["plan"], highlights=reply["highlights"], status="ready", revision=draft["revision"] + 1,
+                         error=None, plan_stale=False, pending_message_id=None)
+            draft["conversation"].append(self._message("assistant", reply["reply"], plan=deepcopy(reply["plan"]),
+                                                       highlights=deepcopy(reply["highlights"]),
                                                        reference_id=draft["id"], revision=draft["revision"], tool_turn=tool_turn))
         except Exception as exc:
-            draft.update(status="ready" if draft["condition"] else "failed",
+            draft.update(status="ready" if draft["plan"] else "failed",
                          error=str(exc) if isinstance(exc, (RuntimeError, ValueError, OSError)) else type(exc).__name__)
         finally:
             with self.lock:
@@ -401,8 +399,8 @@ class SessionManager:
                 folder = self.output
                 report = self._report() or {}
                 allowed = set()
-                if report.get("intent"):
-                    allowed.add("intent-reference.jpg")
+                if report.get("approval"):
+                    allowed.add("reference.jpg")
                 for entry in report.get("observations", []):
                     allowed.add(entry["preview_file"])
                     if entry.get("capture_status") == "downloaded":

@@ -19,6 +19,20 @@ TARGET_SCHEMA = object_schema({
     "id": {"type": "string"}, "label": {"type": "string"}, "box": BOX_SCHEMA,
 })
 
+PLAN_SCHEMA = object_schema({
+    "instructions": {"type": "string", "description": "Self-contained shooting instructions."},
+    "reference": {
+        "anyOf": [{"type": "null"}, object_schema({
+            "photo": {"type": "string", "enum": ["reference.jpg"], "description": "The saved planning preview."},
+            "purpose": {"type": "string", "description": "How to use this photo when evaluating the current preview."},
+            "regions": {"type": "array", "description": "Optional plan regions, independent of conversational highlights.",
+                        "items": object_schema({"id": {"type": "string"}, "label": {"type": "string"},
+                                                "box": {"type": "array", "items": {"type": "number"},
+                                                        "description": "Normalized [x1,y1,x2,y2] coordinates from 0 to 1 on the reference photo."}})},
+        })],
+    },
+})
+
 
 def text(value, label, limit):
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
@@ -37,11 +51,7 @@ def box(value, width=1, height=1):
     return [x1 / width, y1 / height, x2 / width, y2 / height]
 
 
-def validate_intent(value, width=1, height=1, *, allow_empty=False):
-    if not isinstance(value, dict) or set(value) != {"condition", "targets"}:
-        raise ValueError("Supply the capture condition and targets.")
-    condition = "" if allow_empty and value["condition"] == "" else text(value["condition"], "Capture condition", 8000)
-    targets = value["targets"]
+def validate_regions(targets, width=1, height=1):
     if not isinstance(targets, list) or len(targets) > 24:
         raise ValueError("Supply up to 24 optional highlights of visible details.")
     result, ids = [], set()
@@ -55,26 +65,32 @@ def validate_intent(value, width=1, height=1, *, allow_empty=False):
         bounds = box(target["box"], width, height)
         result.append({"id": identity, "label": text(target["label"], "Target label", 120),
                        "box": bounds})
-    return {"condition": condition, "targets": result}
-
-
-def validate_review(value, *, width=1, height=1):
-    fields = {"condition", "reply", "targets", "plan_ready"}
-    if not isinstance(value, dict) or set(value) != fields:
-        raise ValueError("The review reply is incomplete. Try again.")
-    if type(value["plan_ready"]) is not bool:
-        raise ValueError("Plan readiness must be a boolean.")
-    if not value["plan_ready"] and value["condition"] != "":
-        raise ValueError("Leave the shooting plan empty until it is ready for approval.")
-    result = {"plan_ready": value["plan_ready"],
-              "reply": text(value["reply"], "Review reply", 8000)}
-    result.update(validate_intent({k: value[k] for k in ("condition", "targets")}, width, height,
-                                  allow_empty=not value["plan_ready"]))
     return result
 
 
+def validate_plan(value):
+    if not isinstance(value, dict) or set(value) != {"instructions", "reference"}:
+        raise ValueError("Supply plan instructions and an optional reference.")
+    reference = value["reference"]
+    if reference is not None:
+        if (not isinstance(reference, dict) or set(reference) != {"photo", "purpose", "regions"}
+                or reference["photo"] != "reference.jpg"):
+            raise ValueError("Use the saved planning photo as the reference.")
+        reference = {"photo": reference["photo"], "purpose": text(reference["purpose"], "Reference purpose", 8000),
+                     "regions": validate_regions(reference["regions"])}
+    return {"instructions": text(value["instructions"], "Plan instructions", 8000), "reference": reference}
+
+
+def validate_review(value):
+    if not isinstance(value, dict) or set(value) != {"reply", "highlights", "plan"}:
+        raise ValueError("The review reply is incomplete. Try again.")
+    return {"reply": text(value["reply"], "Review reply", 8000),
+            "highlights": validate_regions(value["highlights"]),
+            "plan": validate_plan(value["plan"]) if value["plan"] is not None else None}
+
+
 @dataclass(frozen=True)
-class ApprovedIntent:
+class ApprovedPlan:
     """Serialized approval prevents later draft mutations from affecting monitoring."""
 
     document: str
@@ -82,15 +98,15 @@ class ApprovedIntent:
 
     @classmethod
     def create(cls, draft, reference_path, approved_at):
-        if (draft.get("plan_ready") is not True or draft.get("condition_stale")
+        if (draft.get("plan") is None or draft.get("plan_stale")
                 or draft.get("pending_message_id")):
             raise ValueError("Resolve the latest review before starting.")
-        plan = validate_intent({k: draft[k] for k in ("condition", "targets")})
+        plan = validate_plan(draft["plan"])
         with Image.open(reference_path) as image:
             if list(image.size) != [draft["width"], draft["height"]]:
                 raise ValueError("The reference image dimensions have changed. Review again.")
         data = {key: draft[key] for key in ("id", "revision", "request", "width", "height", "reference_at")}
-        data.update(plan, approved_at=approved_at, reference_file="intent-reference.jpg")
+        data.update(plan=plan, approved_at=approved_at)
         if "source" in draft:
             data["source"] = draft["source"]
         return cls(json.dumps(data, allow_nan=False), Path(reference_path))

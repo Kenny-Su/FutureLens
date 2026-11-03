@@ -137,7 +137,7 @@ dialog { width:min(540px,calc(100vw - 32px)); max-height:88vh; overflow:auto; bo
 dialog::backdrop { background:#22332855; backdrop-filter:blur(3px); }
 dialog h2 { font-size:21px; font-weight:550; letter-spacing:-.5px; }
 #error-message { margin-top:12px; color:var(--muted); }
-#plan-condition { margin:22px 0; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; }
+#plan-instructions { margin:22px 0; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; }
 .plan-actions,.form-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:10px; margin-top:24px; }
 #error-message { white-space:pre-line; overflow-wrap:anywhere; }
 #image-viewer { width:min(1080px,94vw); padding:18px; }
@@ -172,3 +172,9 @@ dialog h2 { font-size:21px; font-weight:550; letter-spacing:-.5px; }
 @media(prefers-reduced-motion:reduce) {
   *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; }
 }
+
+.plan-reference { max-width:540px; margin:16px 0; }
+.plan-reference p { margin-top:10px; color:var(--muted); font-size:13px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+#active-plan-reference { grid-column:1/-1; }
+#active-plan-reference summary { cursor:pointer; color:var(--accent); font-size:13px; }
+.plan-reference img { display:block; width:100%; }

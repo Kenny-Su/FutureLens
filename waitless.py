@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
+from PIL import Image
 import shutil
 import time
 from urllib.parse import urlsplit
@@ -12,7 +13,7 @@ from urllib.parse import urlsplit
 from camera import MacCamera, CameraError
 from demo import VideoCamera, VideoEnded
 from history import PreviewArchive, ObservationJournal, capture_outcome
-from intent import ApprovedIntent
+from intent import ApprovedPlan
 from openai_client import (ApiError, load_config, response_usage, text_content, validate_config, model_image)
 from planner import PLANNING_MODEL
 from monitor import (DECISIONS_ENDPOINT, MONITOR_MODEL, MONITOR_QUESTION_INSTRUCTIONS,
@@ -64,7 +65,8 @@ class Monitor:
     def __init__(self, settings, config, output, report, stop_event):
         self.settings, self.config, self.output = settings, config, output
         self.report, self.stop_event = report, stop_event
-        self.intent = report["intent"]
+        self.approval = report["approval"]
+        self.plan = self.approval["plan"]
 
     def publish(self):
         write_json(self.output / "results.json", self.report)
@@ -133,10 +135,14 @@ class Monitor:
             if outcome:
                 return
             current_image = model_image(preview.image())
-            payload = make_monitoring_payload(self.intent["condition"], current_image)
+            if self.plan["reference"] is not None:
+                with Image.open(self.output / self.plan["reference"]["photo"]) as reference:
+                    payload = make_monitoring_payload(self.plan, current_image, reference)
+            else:
+                payload = make_monitoring_payload(self.plan, current_image)
             journal.message({"role": "user", "content": [
-                text_content({"condition": self.intent["condition"], "frame_id": preview.id,
-                              "intent_revision": self.intent["revision"]}),
+                text_content({"plan": self.plan, "frame_id": preview.id,
+                              "intent_revision": self.approval["revision"]}),
                 {"type": "image", "file": str(preview.path.relative_to(self.output))}]})
             outcome = self.expired(preview)
             if outcome:
@@ -162,7 +168,7 @@ class Monitor:
             outcome = self.expired(preview)
             if outcome:
                 return
-            entry.update(assessment={"frame_id": preview.id, "intent_revision": self.intent["revision"],
+            entry.update(assessment={"frame_id": preview.id, "intent_revision": self.approval["revision"],
                                      "condition": condition, "probability": probability,
                                      "threshold": CAPTURE_PROBABILITY_THRESHOLD}, assessment_status="available")
             if condition == "unmet":
@@ -244,13 +250,13 @@ class Monitor:
         return self.output
 
 
-def run_session(settings: SessionSettings, output: Path, *, approved_intent: ApprovedIntent,
+def run_session(settings: SessionSettings, output: Path, *, approved_plan: ApprovedPlan,
                 camera_id=None, stop_event=None, video=None) -> Path:
     start_deadline = time.monotonic() + settings.start_delay_s
     scheduled_start_at = time.time() + settings.start_delay_s
-    if not isinstance(approved_intent, ApprovedIntent) or approved_intent.data["request"] != settings.request:
-        raise ValueError("A matching approved intent is required before monitoring.")
-    source = approved_intent.data.get("source", {})
+    if not isinstance(approved_plan, ApprovedPlan) or approved_plan.data["request"] != settings.request:
+        raise ValueError("A matching approved plan is required before monitoring.")
+    source = approved_plan.data.get("source", {})
     if (source.get("mode") != ("video" if video else "camera")
             or source.get("id") != (video.metadata()["id"] if video else camera_id)
             or (not video and (not camera_id or source.get("kind") != "iphone"))):
@@ -260,13 +266,15 @@ def run_session(settings: SessionSettings, output: Path, *, approved_intent: App
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     (output / "moments").mkdir()
-    shutil.copyfile(approved_intent.reference_path, output / "intent-reference.jpg")
-    write_json(output / "intent.json", approved_intent.data)
+    reference = approved_plan.data["plan"]["reference"]
+    if reference:
+        shutil.copyfile(approved_plan.reference_path, output / reference["photo"])
+    write_json(output / "approval.json", approved_plan.data)
     report = {
         "status": "running", "phase": "scheduled" if settings.start_delay_s else "connecting",
         "scheduled_start_at": scheduled_start_at, "mode": "demo_video" if video else "continuity_camera",
         "provider": "openai", "model": MONITOR_MODEL,
-        "intent": approved_intent.data,
+        "approval": approved_plan.data,
         "model_settings": {"api": "decisions", "question_type": "predicate",
                            "capture_probability_threshold": CAPTURE_PROBABILITY_THRESHOLD,
                            "planning_model": PLANNING_MODEL},
