@@ -72,24 +72,28 @@ def review_intent(request_text, image, config, *, conversation=None, previous_pl
                                     "reference": "NEW reference image" if reference_changed else "CURRENT saved reference image"})
     highlights = highlights or []
     tool_turn = []
+    replies = []
     while True:
         response = post_json(RESPONSES_ENDPOINT, payload, config)
         if response.get("status") != "completed":
             raise ValueError("The interpretation was incomplete. Try again.")
         calls = [item for item in response["output"] if item["type"] == "function_call"]
         tool_turn.extend(response["output"])
+        blocks = [block for item in response["output"] if item["type"] == "message" for block in item["content"]]
+        replies.extend(block["text"] for block in blocks if block["type"] == "output_text")
         if not calls:
-            blocks = [block for item in response["output"] if item["type"] == "message" for block in item["content"]]
-            if not blocks or any(block["type"] != "output_text" for block in blocks):
+            if not replies or any(block["type"] != "output_text" for block in blocks):
                 raise ValueError("The planner did not return a reply. Try again.")
-            value = {"reply": "\n".join(block["text"] for block in blocks), "plan": None, "highlights": highlights}
+            value = {"reply": "\n\n".join(replies), "plan": None, "highlights": highlights}
             return validate_review(value), tool_turn
         if len(calls) != 1:
             raise ValueError("Unexpected planner tool calls.")
         call = calls[0]
         value = json.loads(call["arguments"])
         if call["name"] == "propose_plan":
-            return validate_review({**value, "highlights": highlights}), tool_turn
+            proposal = validate_review({**value, "highlights": highlights})
+            proposal["reply"] = "\n\n".join([*replies, proposal["reply"]])
+            return proposal, tool_turn
         if call["name"] != "highlight_regions":
             raise ValueError("Unexpected planner tool call.")
         highlights = validate_regions(value["targets"], image.width, image.height)
