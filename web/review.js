@@ -1,4 +1,4 @@
-import {drawOverlay, validPlan, renderPlanReference} from "./intent.mjs";
+import {drawOverlay, renderPlanReference} from "./intent.mjs";
 
 const $ = id => document.getElementById(id);
 export class IntentReview {
@@ -6,7 +6,6 @@ export class IntentReview {
     Object.assign(this, {request, accept, notify, started, cancelled});
     this.draft = null; this.busy = false;
     this.demo = document.documentElement.dataset.mode === "demo";
-    this.scheduleKey = this.demo ? "waitless.demo.sampling" : "waitless.schedule";
     $("check-interval").value = this.demo ? 1 : 60;
     if (this.demo) {
       $("check-interval").min = "0.1";
@@ -15,21 +14,7 @@ export class IntentReview {
     }
     this.messageNodes = new Map();
     this.dialogPlan = null;
-    try {
-      const saved = JSON.parse(localStorage.getItem(this.scheduleKey));
-      if (saved) {
-        $("start-delay").value = (saved.start_delay_s ?? 0) / 60;
-        $("check-interval").value = this.demo ? saved.demo_fps : saved.interval_s;
-        if (!this.schedule()) throw new Error("Invalid saved timing");
-      }
-    } catch {
-      $("start-delay").value = 0; $("check-interval").value = this.demo ? 1 : 60;
-    }
-    for (const id of ["start-delay", "check-interval"]) $(id).addEventListener("input", () => {
-      const timing = this.schedule();
-      if (timing) { try { localStorage.setItem(this.scheduleKey, JSON.stringify(timing)); } catch {} }
-      this.controls();
-    });
+    for (const id of ["start-delay", "check-interval"]) $(id).addEventListener("input", () => this.controls());
     $("intent-refresh").addEventListener("click", () => this.draft
       ? this.perform("/api/intent/prepare", this.identity()) : this.perform("/api/check", {}));
     $("intent-cancel").addEventListener("click", async () => {
@@ -95,6 +80,7 @@ export class IntentReview {
   controls() {
     const locked = !this.connected || this.busy || this.pending || Boolean(this.operation);
     const active = this.draft?.status === "ready" && !locked;
+    const ready = Boolean(this.draft?.plans.length);
     const composer = $("intent-feedback");
     if (this.composerValue !== composer.value) {
       this.composerValue = composer.value;
@@ -108,7 +94,7 @@ export class IntentReview {
     $("check-interval").disabled = locked;
     $("intent-start").textContent = timing?.start_delay_s ? "Confirm and schedule" : "Confirm and start";
     $("intent-start").disabled = !active || !this.hasSource || this.dialogPlan !== this.planKey() ||
-      Boolean(validPlan(this.draft.plans.at(-1)?.plan)) || !timing;
+      !ready || !timing;
     $("intent-refine").disabled = locked || !this.hasSource || (this.draft && !this.draft.preview) || !(message || retry);
     const sendLabel = !message && retry ? "Retry reply" : "Send message";
     $("intent-refine").setAttribute("aria-label", sendLabel);
@@ -118,7 +104,6 @@ export class IntentReview {
     $("intent-cancel").disabled = !this.connected || this.busy || this.pending || !(this.draft || message);
     const thinking = ["preparing", "refining"].includes(this.draft?.status);
     $("review-thinking").hidden = !thinking;
-    const ready = Boolean(this.draft?.plans.length);
     this.canReviewPlan = ready && active && this.hasSource;
     for (const button of $("review-messages").querySelectorAll(".review-plan-button")) {
       const current = button.dataset.planKey === this.planKey();

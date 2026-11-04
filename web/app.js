@@ -34,30 +34,13 @@ function notice(message) {
   if (!dialog.open) dialog.showModal();
 }
 
-function cameraCheckError(check) {
-  if (!check) return null;
-  if (check.error) return check.error;
-  if (!check.capabilities?.capture_ready) {
-    return check.capabilities?.capture_issues?.join(" ") || "The camera cannot provide photos. Reconnect the input and try again.";
-  }
-  return null;
-}
-
 function sessionError(next) {
   const report = next.report || {};
   return next.error || report.error || report.camera_error || (report.status === "failed" ? "Session failed." : null);
 }
 
 function loadPreview(image, url) {
-  if (image.dataset.source === url) return;
-  image.dataset.source = url;
-  let retries = 0;
-  image.onerror = () => {
-    if (retries++ < 2) setTimeout(() => {
-      if (image.isConnected && image.dataset.source === url) image.src = `${url}?retry=${retries}`;
-    }, 800 * retries);
-  };
-  image.src = url;
+  if (image.getAttribute("src") !== url) image.src = url;
 }
 
 async function api(path, data) {
@@ -108,7 +91,7 @@ function accept(next) {
   }
   initialized = true;
   render();
-  const checkError = cameraCheckError(state.camera_check);
+  const checkError = state.camera_check?.error || null;
   if (checkError && checkError !== lastCheckError) notice(checkError);
   lastCheckError = checkError;
   if (state.source_error && state.source_error !== lastSourceError) notice(state.source_error);
@@ -122,8 +105,8 @@ function renderCameraStatus() {
   const report = monitoring ? state.report || {} : {};
   const checking = state.operation === "check" || (monitoring && (!report.phase || report.phase === "connecting"));
   const check = state.camera_check;
-  const error = check ? cameraCheckError(check) : report.camera_error;
-  const ready = !error && (check ? check.capabilities?.capture_ready : report.status !== "failed" && report.camera_capabilities?.capture_ready);
+  const error = check?.error || report.camera_error;
+  const ready = !error && (check ? Boolean(check.preview) : report.status !== "failed" && Boolean(report.monitoring_started_at));
   const healthy = connected && !checking && !connecting && !disconnecting && ready;
   const demo = state.source.mode === "video";
   text("camera-status", !connected ? "Connection lost" : state.operation === "import" ? "Importing video…"

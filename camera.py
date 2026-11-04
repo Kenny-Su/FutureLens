@@ -66,14 +66,6 @@ def list_cameras():
 class CameraFrame:
     image: Image.Image
     received_at: float
-    frame_no: int
-
-
-class CameraError(RuntimeError):
-    def __init__(self, message, model, capabilities):
-        super().__init__(message)
-        self.model = model
-        self.capabilities = capabilities
 
 
 class MacCamera:
@@ -91,7 +83,6 @@ class MacCamera:
         self.reader = None
         self.events = queue.Queue()
         self.model = None
-        self.capabilities = {}
         self.failure = None
         self.closing = False
 
@@ -102,9 +93,6 @@ class MacCamera:
                 or event.get("high_resolution") is not True):
             raise RuntimeError("Camera helper did not enable high-quality still-photo capture")
         self.model = event["model"]
-        self.capabilities = {"live_view": True, "capture_ready": True,
-                             "preview_issues": [], "capture_issues": [], "capture_kind": "photo",
-                             "high_resolution": True, "quality_prioritization": "quality"}
 
     def _failed(self, message):
         if not self.closing:
@@ -163,10 +151,8 @@ class MacCamera:
             self.reader.start()
             self._accept_camera(self._receive("ready"))
             return self
-        except BaseException as exc:
+        except BaseException:
             self.close()
-            if isinstance(exc, RuntimeError) and self.model and not isinstance(exc, CameraError):
-                raise CameraError(str(exc), self.model, self.capabilities) from None
             raise
 
     def latest_frame(self):
@@ -175,7 +161,7 @@ class MacCamera:
         event = self._receive("frame")
         with Image.open(io.BytesIO(event["data"])) as image:
             frame = ImageOps.exif_transpose(image).convert("RGB")
-        return CameraFrame(frame, requested_at, event["frame_no"])
+        return CameraFrame(frame, requested_at)
 
     def capture(self, capture_id: int):
         if not self.enable_capture:

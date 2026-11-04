@@ -9,11 +9,10 @@ from PIL import Image
 import shutil
 import time
 
-from camera import MacCamera, CameraError
+from camera import MacCamera
 from demo import VideoCamera, VideoEnded
-from history import PreviewArchive
 from intent import ApprovedPlan
-from openai_client import (ApiError, load_config, validate_config, model_image)
+from openai_client import ApiError, load_config, validate_config
 from monitor import (MONITOR_MODEL,
                      make_monitoring_payload, evaluate_preview, decision_probability)
 
@@ -64,13 +63,12 @@ class Monitor:
     def publish(self):
         write_json(self.output / "results.json", self.report)
 
-    def observe(self, preview, entry):
-        current_image = model_image(preview.image())
+    def observe(self, image, entry):
         if self.plan["reference"] is not None:
             with Image.open(self.output / self.plan["reference"]["photo"]) as reference:
-                payload = make_monitoring_payload(self.plan, current_image, reference)
+                payload = make_monitoring_payload(self.plan, image, reference)
         else:
-            payload = make_monitoring_payload(self.plan, current_image)
+            payload = make_monitoring_payload(self.plan, image)
         check_stop(self.stop_event)
         self.report["phase"] = "thinking"
         self.publish()
@@ -91,12 +89,11 @@ class Monitor:
         with source as self.camera:
             self.report.update(camera_model=self.camera.model,
                                source=f"video:{video.name}" if video else f"continuity:{self.camera.model}",
-                               camera_capabilities=self.camera.capabilities,
                                monitoring_started_at=datetime.now(timezone.utc).isoformat())
             self.publish()
             start = time.monotonic()
             next_sample = start
-            self.archive = PreviewArchive(self.output, start)
+            (self.output / "previews").mkdir()
             while True:
                 check_stop(self.stop_event)
                 now = time.monotonic()
@@ -107,27 +104,27 @@ class Monitor:
                     else:
                         self.stop_event.wait(delay)
                 check_stop(self.stop_event)
-                if video and self.camera.remaining_seconds <= 0:
-                    self.report.update(status="completed", stop_reason="video_end")
-                    break
                 self.report.update(phase="observing", next_observation_at=None)
                 self.publish()
                 try:
-                    preview = self.archive.append(self.camera.latest_frame())
+                    frame = self.camera.latest_frame()
                 except VideoEnded:
                     self.report.update(status="completed", stop_reason="video_end")
                     break
-                entry = {**preview.metadata(), "preview_file": str(preview.path.relative_to(self.output))}
+                frame_id = len(self.report["observations"])
+                preview_file = f"previews/{frame_id:06d}.jpg"
+                frame.image.save(self.output / preview_file, format="JPEG", quality=95, subsampling=0)
+                entry = {"frame_id": frame_id, "timestamp_s": frame.received_at - start, "preview_file": preview_file}
                 if video:
                     entry["video_position_s"] = self.camera.last_frame_position
                 self.report["observations"].append(entry)
                 self.publish()
-                self.observe(preview, entry)
+                self.observe(frame.image, entry)
                 check_stop(self.stop_event)
                 if video:
-                    self.camera.position = self.archive.count / self.settings.demo_fps
+                    self.camera.position = len(self.report["observations"]) / self.settings.demo_fps
                     continue
-                next_sample = max(time.monotonic(), preview.received_at + self.settings.interval_s)
+                next_sample = max(time.monotonic(), frame.received_at + self.settings.interval_s)
                 self.report.update(phase="waiting", next_observation_at=time.time() + max(0, next_sample - time.monotonic()))
                 self.publish()
         self.publish()
@@ -195,9 +192,6 @@ def run_session(settings: SessionSettings, output: Path, *, approved_plan: Appro
         raise
     except Exception as exc:
         report.update(status="failed", error=str(exc))
-        if isinstance(exc, CameraError):
-            report.update(camera_model=exc.model, source=f"continuity:{exc.model}",
-                          camera_capabilities=exc.capabilities, camera_error=str(exc))
         if isinstance(exc, ApiError):
             report["api_error"] = exc.details
         write_json(output / "results.json", report)

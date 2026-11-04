@@ -91,9 +91,9 @@ def review_intent(request_text, image, config, *, conversation=None, previous_pl
         call = calls[0]
         value = json.loads(call["arguments"])
         if call["name"] == "propose_plan":
-            proposal = validate_review({**value, "highlights": highlights})
-            proposal["reply"] = "\n\n".join([*replies, proposal["reply"]])
-            return proposal, tool_turn
+            if isinstance(value.get("reply"), str):
+                value["reply"] = "\n\n".join([*replies, value["reply"]])
+            return validate_review({**value, "highlights": highlights}), tool_turn
         if call["name"] != "highlight_regions":
             raise ValueError("Unexpected planner tool call.")
         highlights = validate_regions(value["targets"], image.width, image.height)

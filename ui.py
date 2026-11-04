@@ -19,7 +19,7 @@ from demo import DemoVideo, VideoCamera
 from waitless import SessionSettings, run_session, write_json
 from openai_client import load_config, validate_config, model_image
 from planner import review_intent
-from intent import ApprovedPlan, validate_review
+from intent import ApprovedPlan
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "web"
@@ -194,9 +194,9 @@ class SessionManager:
 
         try:
             if fresh:
-                frame, model, capabilities = self._preview_frame(folder)
+                frame, model = self._preview_frame(folder)
                 image = model_image(frame.image)
-                draft.update(camera_model=model, camera_capabilities=capabilities)
+                draft["camera_model"] = model
                 image.save(folder / "reference.jpg", quality=95, subsampling=0)
                 draft.update(width=image.width, height=image.height,
                              reference_at=datetime.now(timezone.utc).isoformat(),
@@ -210,8 +210,6 @@ class SessionManager:
                 reply, tool_turn = review_intent(draft["request"], image, config, conversation=deepcopy(draft["conversation"]),
                                                 previous_plan=deepcopy(previous_plan), reference_changed=fresh,
                                                 highlights=deepcopy(draft["highlights"]), on_highlight=highlight)
-            # Validate model output before replacing the current interpretation.
-            reply = validate_review(reply)
             draft.update(highlights=reply["highlights"], status="ready", revision=draft["revision"] + 1,
                          error=None, pending_message_id=None)
             message = self._message("assistant", reply["reply"], highlights=deepcopy(reply["highlights"]),
@@ -241,7 +239,7 @@ class SessionManager:
                           MacCamera(folder / "moments", device_id=self.selected_camera["id"]))
                 self.preview_camera = self.preview_context.enter_context(device)
             camera = self.preview_camera
-            return camera.latest_frame(), camera.model, deepcopy(camera.capabilities)
+            return camera.latest_frame(), camera.model
         except Exception:
             self._close_preview()
             raise
@@ -350,8 +348,8 @@ class SessionManager:
         result = {}
         try:
             self.check_output.mkdir(parents=True, exist_ok=True)
-            frame, model, capabilities = self._preview_frame(self.check_output)
-            result.update(model=model, capabilities=capabilities)
+            frame, model = self._preview_frame(self.check_output)
+            result["model"] = model
             frame.image.save(self.check_output / "preview.jpg", quality=95)
             result["preview"] = f"/media/{self.check_output.name}/preview.jpg"
         except Exception as exc:

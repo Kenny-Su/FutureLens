@@ -48,7 +48,6 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
     var pendingFrame: CVPixelBuffer?
     var failure: String?
     var observers: [NSObjectProtocol] = []
-    var frameNumber = 0
     var photoID: Int64?
     var photoData: Data?
     var photoError: String?
@@ -139,7 +138,6 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
             options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]) else {
             throw CameraFailure(message: "Could not encode the iPhone preview.")
         }
-        frameNumber += 1
         return jpeg
     }
 
@@ -224,7 +222,7 @@ func run() throws {
         if line == "QUIT" { return }
         if line == "FRAME" {
             let data = try camera.frame()
-            try emit(["event": "frame", "bytes": data.count, "frame_no": camera.frameNumber], image: data)
+            try emit(["event": "frame", "bytes": data.count], image: data)
         } else if line == "PHOTO" && allowCapture {
             let data = try camera.photo()
             try emit(["event": "photo", "bytes": data.count], image: data)

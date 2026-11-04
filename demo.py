@@ -57,14 +57,11 @@ class DemoVideo:
 class VideoCamera:
     """Advance explicitly between decisions; captures preserve the evaluated frame."""
 
-    capabilities = {"live_view": True, "capture_ready": True, "preview_issues": [], "capture_issues": []}
-
     def __init__(self, video, output, *, enable_capture=False):
         self.video, self.output = video, Path(output)
         self.enable_capture = enable_capture
         self.model = f"Demo video · {video.name}"
         self.container = None
-        self.frame_no = 0
         self.position = 0
         self.current_image = None
         self.last_frame_position = None
@@ -73,10 +70,6 @@ class VideoCamera:
         self.container = open_video(self.video.path)
         self.stream = self.container.streams.video[0]
         return self
-
-    @property
-    def remaining_seconds(self):
-        return max(0, self.video.duration - self.position)
 
     def _frame_at(self, seconds):
         if seconds >= self.video.duration:
@@ -103,8 +96,7 @@ class VideoCamera:
         requested = time.monotonic()
         image, self.last_frame_position = self._frame_at(self.position)
         self.current_image = image
-        self.frame_no += 1
-        return CameraFrame(image, requested, self.frame_no)
+        return CameraFrame(image, requested)
 
     def capture(self, capture_id):
         if not self.enable_capture:
